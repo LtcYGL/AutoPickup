@@ -1,0 +1,250 @@
+﻿{
+  "name": "shift-single",
+  "description": "单个班次（原子引擎）：手势优先，失败回退暂停菜单（与旧流程一致）→ 下云cue即刻封网 → 确认到达在线 → 等保存失败 → 回故事（同样手势优先+菜单回退）→ 恢复联网",
+  "steps": [
+    {
+      "id": "leave_menu",
+      "title": "清场（收起菜单）",
+      "note": "起始清场：菜单开着就按 B 收起；本来就关着就不按键",
+      "action": { "op": "menu", "mode": "close" },
+      "observe": ["menuopen"],
+      "expect": [ "ctx:menuopen eq false" ],
+      "retry": { "max": 2, "intervalMs": 1000 },
+      "onFail": "continue"
+    },
+
+    {
+      "id": "gesture_online",
+      "title": "进线上手势",
+      "note": "先试轮盘手势（旧流程同样“摇杆优先”）；失败不中止，改走下面的菜单回退",
+      "action": { "op": "gesture", "dir": "down" },
+      "observe": ["dialog"],
+      "expect": [ "ctx:dialog eq true" ],
+      "timeoutSec": 25,
+      "retry": { "max": 2, "intervalMs": 3000 },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_online_menu",
+      "title": "回退·开菜单",
+      "note": "【回退·故事→在线】打开暂停菜单",
+      "require": [ "fact:gesture_online.ok eq false" ],
+      "action": { "op": "menu", "mode": "open" },
+      "observe": ["menuopen"],
+      "expect": [ "ctx:menuopen eq true" ],
+      "timeoutSec": 15,
+      "retry": { "max": 2, "intervalMs": 1500 },
+      "onFail": "abort"
+    },
+    {
+      "id": "fb_online_tab",
+      "title": "回退·切在线页",
+      "note": "【回退】切到“在线”页",
+      "require": [ "fact:gesture_online.ok eq false" ],
+      "action": { "op": "tab", "target": "在线" },
+      "observe": ["selectedtab"],
+      "expect": [ "ctx:selectedtab like 在线" ],
+      "retry": { "max": 3, "intervalMs": 800 },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_online_enter",
+      "title": "回退·进入GTA在线模式",
+      "note": "【回退】焦点走到“进入GTA在线模式”并进入",
+      "require": [ "fact:gesture_online.ok eq false" ],
+      "action": { "op": "navigate", "name": "进入GTA在线模式", "target": "DPadDown", "times": 15 },
+      "observe": ["focusrow"],
+      "expect": [ "ctx:focusrow like 进入GTA在线模式" ],
+      "timeoutSec": 15,
+      "retry": { "max": 3, "intervalMs": 1000 },
+      "onFail": "abort"
+    },
+    {
+      "id": "fb_online_pick",
+      "title": "回退·确认进入",
+      "note": "【回退】进入子列表后选“凭邀请加入的战局”并确认",
+      "require": [ "fact:gesture_online.ok eq false" ],
+      "action": { "op": "tap", "button": "A" },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_online_invite",
+      "title": "回退·选邀请战局",
+      "require": [ "fact:gesture_online.ok eq false" ],
+      "action": { "op": "navigate", "name": "凭邀请加入的战局", "target": "DPadDown", "times": 15 },
+      "observe": ["focusrow"],
+      "expect": [ "ctx:focusrow like 凭邀请加入的战局" ],
+      "timeoutSec": 15,
+      "retry": { "max": 3, "intervalMs": 1000 },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_online_go",
+      "title": "回退·确认战局",
+      "require": [ "fact:gesture_online.ok eq false" ],
+      "action": { "op": "tap", "button": "A" },
+      "onFail": "continue"
+    },
+
+    {
+      "id": "confirm_online",
+      "title": "确认弹窗（进线上）",
+      "note": "确认弹窗（手势路径=快捷切换确认框；菜单路径=退出GTAV确认框），确认后必定切模式",
+      "action": { "op": "tap", "button": "A" },
+      "observe": ["dialog"],
+      "expect": [ "ctx:dialog eq false" ],
+      "timeoutSec": 25,
+      "retry": { "max": 2, "intervalMs": 2000 },
+      "onFail": "continue"
+    },
+    {
+      "id": "wait_cue",
+      "title": "等“下云”声音",
+      "note": "卡大仓关键时机：等“下云”声音（安静→响亮）。未启用封网时自动跳过",
+      "action": { "op": "waitcue" },
+      "expect": [ "fact:cue eq true" ],
+      "onFail": "continue"
+    },
+    {
+      "id": "block_cloud",
+      "title": "封网（阻断云存档）",
+      "note": "cue 命中即刻封网；超时也补封（与旧流程 fallback 一致）",
+      "action": { "op": "firewall", "enable": true },
+      "expect": [ "fact:firewall eq true" ],
+      "retry": { "max": 2, "intervalMs": 1000 },
+      "onFail": "continue"
+    },
+    {
+      "id": "wait_online",
+      "title": "确认到达在线",
+      "note": "探针确认到达在线（mode 判据依赖暂停菜单 tab 条，所以会按 Start 开菜单；已开则不按）",
+      "action": { "op": "waitmode", "target": "online", "ms": 300 },
+      "expect": [ "fact:mode_reached eq true" ],
+      "onFail": "abort"
+    },
+    {
+      "id": "close_menu_online",
+      "title": "关菜单",
+      "action": { "op": "menu", "mode": "close" },
+      "observe": ["menuopen"],
+      "expect": [ "ctx:menuopen eq false" ],
+      "retry": { "max": 2, "intervalMs": 800 },
+      "onFail": "continue"
+    },
+    {
+      "id": "wait_savefail",
+      "title": "等“保存失败”提示",
+      "note": "验证云存档确实被阻断：左下角出现“保存失败”提示",
+      "action": { "op": "sleep", "ms": 1500 },
+      "observe": ["toast"],
+      "expect": [ "ctx:toast eq savefail" ],
+      "timeoutSec": 60,
+      "retry": { "max": 2, "intervalMs": 2000 },
+      "onFail": "continue"
+    },
+
+    {
+      "id": "gesture_return",
+      "title": "回故事手势",
+      "note": "先试轮盘手势回故事；失败不中止，改走下面的菜单回退",
+      "action": { "op": "gesture", "dir": "up" },
+      "observe": ["dialog"],
+      "expect": [ "ctx:dialog eq true" ],
+      "timeoutSec": 25,
+      "retry": { "max": 2, "intervalMs": 3000 },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_return_menu",
+      "title": "回退·开菜单",
+      "note": "【回退·在线→故事】打开暂停菜单",
+      "require": [ "fact:gesture_return.ok eq false" ],
+      "action": { "op": "menu", "mode": "open" },
+      "observe": ["menuopen"],
+      "expect": [ "ctx:menuopen eq true" ],
+      "timeoutSec": 15,
+      "retry": { "max": 2, "intervalMs": 1500 },
+      "onFail": "abort"
+    },
+    {
+      "id": "fb_return_tab",
+      "title": "回退·切在线页",
+      "require": [ "fact:gesture_return.ok eq false" ],
+      "action": { "op": "tab", "target": "在线" },
+      "observe": ["selectedtab"],
+      "expect": [ "ctx:selectedtab like 在线" ],
+      "retry": { "max": 3, "intervalMs": 800 },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_return_nav",
+      "title": "回退·选中“退至故事模式”",
+      "note": "【回退】焦点走到“退至故事模式”",
+      "require": [ "fact:gesture_return.ok eq false" ],
+      "action": { "op": "navigate", "name": "退至故事模式", "target": "DPadDown", "times": 20 },
+      "observe": ["focusrow"],
+      "expect": [ "ctx:focusrow like 退至故事模式" ],
+      "timeoutSec": 20,
+      "retry": { "max": 3, "intervalMs": 1000 },
+      "onFail": "abort"
+    },
+    {
+      "id": "fb_return_go",
+      "title": "回退·确认退出",
+      "note": "【回退】按 A 触发退出确认框（由下一步的 confirm_return 确认）",
+      "require": [ "fact:gesture_return.ok eq false" ],
+      "action": { "op": "tap", "button": "A" },
+      "timeoutSec": 20,
+      "onFail": "continue"
+    },
+
+    {
+      "id": "confirm_return",
+      "title": "确认弹窗（回故事）",
+      "action": { "op": "tap", "button": "A" },
+      "observe": ["dialog"],
+      "expect": [ "ctx:dialog eq false" ],
+      "timeoutSec": 25,
+      "retry": { "max": 2, "intervalMs": 2000 },
+      "onFail": "continue"
+    },
+    {
+      "id": "wait_story",
+      "title": "等待到达故事",
+      "note": "探针等到达故事：最慢的一段（加载+连服）",
+      "action": { "op": "waitmode", "target": "story", "ms": 300 },
+      "expect": [ "fact:mode_reached eq true" ],
+      "onFail": "abort"
+    },
+    {
+      "id": "close_menu_story",
+      "title": "关菜单（回故事后）",
+      "action": { "op": "menu", "mode": "close" },
+      "observe": ["menuopen"],
+      "expect": [ "ctx:menuopen eq false" ],
+      "retry": { "max": 2, "intervalMs": 800 },
+      "onFail": "continue"
+    },
+    {
+      "id": "unblock_cloud",
+      "title": "恢复联网",
+      "note": "回到线下后恢复联网",
+      "action": { "op": "firewall", "enable": false },
+      "onFail": "continue"
+    }
+  ],
+  "cleanup": [
+    {
+      "id": "cleanup_menu",
+      "title": "收尾·关菜单",
+      "require": [ "ctx:menuopen eq true" ],
+      "action": { "op": "menu", "mode": "close" }
+    },
+    {
+      "id": "cleanup_net",
+      "title": "收尾·恢复联网",
+      "note": "无论如何都要恢复联网，绝不把用户留在封网状态",
+      "action": { "op": "firewall", "enable": false }
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>AutoPickup</AssemblyName>
+    <RootNamespace>AutoPickup</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <PlatformTarget>x64</PlatformTarget>
+    <Version>0.2.0</Version>
+  </PropertyGroup>
+<ItemGroup>
+    <!-- 模板 / 原生 dll / 默认流程全部**内嵌进 exe**（单文件分发）；
+         首次运行由 AssetBootstrap 释放到 %LOCALAPPDATA%\AutoPickup\，不覆盖用户已有文件。
+         开发期仍复制一份到输出目录，便于命令行工具直接使用。 -->
+    <EmbeddedResource Include="assets\templates\**\*.jpg" LogicalName="templates.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="assets\native\ViGEmClient.dll" LogicalName="native.ViGEmClient.dll" />
+    <EmbeddedResource Include="flows\shift_single.json" LogicalName="flows.shift_single.json" />
+    <None Include="assets\native\ViGEmClient.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="flows\**\*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+<ItemGroup>
+  <PackageReference Include="NAudio" Version="2.2.1" />
+</ItemGroup>
+<ItemGroup>
+  <!-- tools/ 下是独立小工具（各自有 csproj），不参与主程序编译 -->
+  <Compile Remove="tools/**" />
+  <None Remove="tools/**" />
+  <EmbeddedResource Remove="tools/**" />
+  <Content Remove="tools/**" />
+</ItemGroup>
+</Project>

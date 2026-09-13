@@ -1,0 +1,10 @@
+{
+  "name": "firewall-check",
+  "description": "验收防火墙原子：启用/禁用都记成 fact:firewall，供 Gate 引用",
+  "steps": [
+    { "id": "on",  "action": { "op": "firewall", "enable": true  },
+      "expect": [ "fact:firewall eq true" ], "retry": { "max": 2, "intervalMs": 500 }, "onFail": "abort" },
+    { "id": "off", "action": { "op": "firewall", "enable": false },
+      "expect": [ "fact:firewall eq false" ], "retry": { "max": 2, "intervalMs": 500 }, "onFail": "abort" }
+  ]
+}

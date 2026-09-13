@@ -1,0 +1,52 @@
+{
+  "name": "menu-atom-check",
+  "description": "验证菜单原子：菜单已开时**不按 Start**（旧 FSM 正是在这里把菜单按关、再补按开，形成 toggle 循环）",
+  "steps": [
+    {
+      "id": "open_menu",
+      "note": "请求开菜单；因为已经开着，原子应当只“沿用”而不按键",
+      "action": { "op": "menu", "mode": "open" },
+      "observe": ["menuopen", "mode"],
+      "expect": [ "ctx:menuopen eq true" ],
+      "retry": { "max": 2, "intervalMs": 800 },
+      "onFail": "abort"
+    },
+    {
+      "id": "switch_to_story",
+      "note": "轮盘切回故事（动作 + 判据）",
+      "action": { "op": "gesture", "dir": "up" },
+      "observe": ["dialog"],
+      "expect": [ "ctx:dialog eq true" ],
+      "timeoutSec": 20,
+      "retry": { "max": 2, "intervalMs": 1500 },
+      "onFail": "abort"
+    },
+    {
+      "id": "confirm",
+      "action": { "op": "tap", "button": "A" },
+      "observe": ["dialog"],
+      "expect": [ "ctx:dialog eq false" ],
+      "timeoutSec": 20,
+      "retry": { "max": 2, "intervalMs": 1500 },
+      "onFail": "abort"
+    },
+    {
+      "id": "arrive_story",
+      "action": { "op": "sleep", "ms": 1500 },
+      "observe": ["mode"],
+      "expect": [ "ctx:mode eq story" ],
+      "timeoutSec": 30,
+      "retry": { "max": 2, "intervalMs": 1500 },
+      "onFail": "abort"
+    },
+    {
+      "id": "close_menu",
+      "note": "关菜单；这次应当按 B",
+      "action": { "op": "menu", "mode": "close" },
+      "observe": ["menuopen"],
+      "expect": [ "ctx:menuopen eq false" ],
+      "retry": { "max": 2, "intervalMs": 800 },
+      "onFail": "skip"
+    }
+  ]
+}

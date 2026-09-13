@@ -1,0 +1,24 @@
+﻿{
+  "name": "navigate-check",
+  "description": "验收 navigate 原子：焦点行读得出时能识别“已到位”，不必乱按键",
+  "steps": [
+    {
+      "id": "read_menu",
+      "observe": ["mode", "menuopen"],
+      "action": { "op": "noop" },
+      "expect": [ "ctx:mode eq online", "ctx:menuopen eq true" ],
+      "retry": { "max": 2, "intervalMs": 800 },
+      "onFail": "abort"
+    },
+    {
+      "id": "walk_to_story_item",
+      "note": "目标已在焦点上 → 应当直接“到位（走了 0 步）”，不按键",
+      "action": { "op": "navigate", "name": "退至故事模式", "target": "DPadDown", "times": 15 },
+      "observe": ["focusrow"],
+      "expect": [ "ctx:focusrow like 退至故事模式" ],
+      "retry": { "max": 3, "intervalMs": 800 },
+      "onFail": "abort"
+    }
+  ]
+}
+

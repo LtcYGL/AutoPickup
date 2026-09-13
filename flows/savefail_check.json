@@ -1,0 +1,25 @@
+{
+  "name": "savefail-check",
+  "description": "验收：关掉暂停菜单 → 自由漫游 → 等待左下角“保存失败”提示出现",
+  "steps": [
+    {
+      "id": "leave_menu",
+      "note": "在线暂停菜单 → 按 B 收起，进入自由漫游",
+      "action": { "op": "menu", "mode": "close" },
+      "observe": ["menuopen"],
+      "expect": [ "ctx:menuopen eq false" ],
+      "retry": { "max": 2, "intervalMs": 1000 },
+      "onFail": "abort"
+    },
+    {
+      "id": "see_savefail",
+      "note": "等“保存失败”提示；动作是等，判据在 toast",
+      "action": { "op": "sleep", "ms": 1500 },
+      "observe": ["toast"],
+      "expect": [ "ctx:toast eq savefail" ],
+      "timeoutSec": 30,
+      "retry": { "max": 2, "intervalMs": 1500 },
+      "onFail": "abort"
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "name": "online2story",
+  "description": "在线→故事（轮盘快捷切换）：动作只负责做，判据(Gate)负责验收；可离线回放",
+  "steps": [
+    {
+      "id": "see_online",
+      "note": "纯观察：开始时在在线暂停菜单（不按键、不推进帧）",
+      "observe": ["mode", "menuopen"],
+      "action": { "op": "noop" },
+      "expect": [ "ctx:mode eq online", "ctx:menuopen eq true" ],
+      "retry": { "max": 2, "intervalMs": 800 },
+      "onFail": "abort"
+    },
+    {
+      "id": "gesture_return",
+      "note": "做一次回故事轮盘手势；成不成由「确认弹窗出现」验收",
+      "action": { "op": "gesture", "dir": "up" },
+      "observe": ["dialog"],
+      "expect": [ "ctx:dialog eq true" ],
+      "timeoutSec": 20,
+      "retry": { "max": 2, "intervalMs": 1500 },
+      "onFail": "abort"
+    },
+    {
+      "id": "confirm_dialog",
+      "note": "按 A 确认（已确认：确认后必定切模式），这里只验「弹窗收起」",
+      "action": { "op": "tap", "button": "A" },
+      "observe": ["dialog"],
+      "expect": [ "ctx:dialog eq false" ],
+      "timeoutSec": 20,
+      "retry": { "max": 2, "intervalMs": 1500 },
+      "onFail": "abort"
+    },
+    {
+      "id": "wait_story",
+      "note": "等到达故事：纯观察轮询（sleep 推时间轴），只认 tab 词证（简讯）",
+      "action": { "op": "sleep", "ms": 1500 },
+      "observe": ["mode"],
+      "expect": [ "ctx:mode eq story" ],
+      "timeoutSec": 30,
+      "retry": { "max": 2, "intervalMs": 1500 },
+      "onFail": "abort"
+    }
+  ],
+  "cleanup": [
+    {
+      "id": "close_menu",
+      "require": [ "ctx:mode eq story", "ctx:menuopen eq true" ],
+      "action": { "op": "tap", "button": "B" },
+      "note": "到达故事后按 B 收起暂停菜单"
+    }
+  ]
+}

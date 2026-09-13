@@ -1,0 +1,373 @@
+using System.ComponentModel;
+using System.Diagnostics;
+using AutoPickup.Config;
+using AutoPickup.Core.Flow;
+using AutoPickup.Logging;
+
+namespace AutoPickup.Ui;
+
+/// <summary>
+/// 流程编辑器（M5 起步）：左侧原子调色板（按 观察/动作/判据/控制 分组），
+/// 中间按序拼接步骤，右侧编辑选中步骤的参数与判据，底部可一键用回放验收。
+/// 数据模型是 <see cref="FlowDraft"/>，保存出来就是 flows/*.json，与手写等价。
+/// </summary>
+public sealed class FlowEditorPage : UserControl
+{
+    private readonly FlowDraft _draft = new();
+    private readonly ListBox _palette = new();
+    private readonly ListBox _steps = new();
+    private readonly PropertyGrid _props = new();
+    private readonly TextBox _trace = new();
+    private readonly ComboBox _replays = new();
+    private readonly TextBox _name = new();
+    private readonly ListBox _atoms = new();
+
+    public FlowEditorPage()
+    {
+        Dock = DockStyle.Fill;
+        BackColor = Color.FromArgb(24, 27, 33);
+        ForeColor = Color.Gainsboro;
+
+        // ---------- 左：原子调色板 ----------
+        var left = MkColumn("原子（双击加入流程）", 250);
+        _palette.Dock = DockStyle.Fill;
+        _palette.BackColor = Color.FromArgb(31, 35, 42);
+        _palette.ForeColor = Color.Gainsboro;
+        _palette.DoubleClick += (_, _) => AddSelectedAtom();
+        left.Controls.Add(_palette);
+        left.Controls.Add(MkHint("观察=纯读不按键；动作=只做不自验；判据=决定成败"));
+
+        // ---------- 中：流程步骤 ----------
+        var mid = MkColumn("流程步骤", 330);
+        var midBtns = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 34, BackColor = Color.FromArgb(31, 35, 42) };
+        midBtns.Controls.Add(MkBtn("↑", () => MoveStep(-1)));
+        midBtns.Controls.Add(MkBtn("↓", () => MoveStep(1)));
+        midBtns.Controls.Add(MkBtn("删除", RemoveSelected));
+        midBtns.Controls.Add(MkBtn("存为JSON", SaveDraft));
+        midBtns.Controls.Add(MkBtn("打开JSON", LoadDraft));
+        _steps.Dock = DockStyle.Fill;
+        _steps.BackColor = Color.FromArgb(31, 35, 42);
+        _steps.ForeColor = Color.Gainsboro;
+        _steps.SelectedIndexChanged += (_, _) => ShowStepProps();
+        mid.Controls.Add(_steps);
+        mid.Controls.Add(midBtns);
+        var nameRow = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 30, BackColor = Color.FromArgb(31, 35, 42) };
+        nameRow.Controls.Add(new Label { Text = "名称", ForeColor = Color.Gainsboro, AutoSize = true, Padding = new Padding(4, 8, 2, 0) });
+        _name.Width = 200;
+        nameRow.Controls.Add(_name);
+        mid.Controls.Add(nameRow);
+
+        // ---------- 右：步骤参数 ----------
+        var right = MkColumn("选中步骤的参数", 380);
+        _props.Dock = DockStyle.Fill;
+        _props.BackColor = Color.FromArgb(31, 35, 42);
+        _props.ForeColor = Color.Gainsboro;
+        _props.HelpVisible = true;
+        _props.PropertyValueChanged += (_, _) => SyncPropsToStep();
+        right.Controls.Add(_props);
+
+        // ---------- 下：回放验收 ----------
+        var bottom = new Panel { Dock = DockStyle.Bottom, Height = 190, BackColor = Color.FromArgb(20, 23, 28) };
+        var runRow = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 34, BackColor = Color.FromArgb(31, 35, 42) };
+        runRow.Controls.Add(new Label { Text = "回放脚本", ForeColor = Color.Gainsboro, AutoSize = true, Padding = new Padding(4, 8, 2, 0) });
+        _replays.Width = 260;
+        _replays.DropDownStyle = ComboBoxStyle.DropDownList;
+        runRow.Controls.Add(_replays);
+        runRow.Controls.Add(MkBtn("刷新", RefreshReplays));
+        runRow.Controls.Add(MkBtn("用回放跑一遍", RunReplay));
+        bottom.Controls.Add(runRow);
+        _trace.Multiline = true;
+        _trace.ScrollBars = ScrollBars.Both;
+        _trace.WordWrap = false;
+        _trace.ReadOnly = true;
+        _trace.Dock = DockStyle.Fill;
+        _trace.BackColor = Color.FromArgb(16, 18, 22);
+        _trace.ForeColor = Color.FromArgb(170, 220, 170);
+        _trace.Font = new Font("Consolas", 9f);
+        bottom.Controls.Add(_trace);
+        bottom.Controls.SetChildIndex(_trace, 0);
+
+        var body = new Panel { Dock = DockStyle.Fill };
+        body.Controls.Add(right);
+        body.Controls.Add(mid);
+        body.Controls.Add(left);
+        Controls.Add(bottom);
+        Controls.Add(body);
+
+        FillPalette();
+        RefreshReplays();
+    }
+
+    // ---------------- 调色板 ----------------
+    private void FillPalette()
+    {
+        _palette.Items.Clear();
+        foreach (var kind in new[] { "observe", "action", "gate", "control" })
+        {
+            _palette.Items.Add("── " + KindLabel(kind) + " ──");
+            foreach (var a in AtomCatalog.ByKind(kind))
+                _palette.Items.Add(new AtomRow(a));
+        }
+    }
+
+    private static string KindLabel(string k) => k switch
+    {
+        "observe" => "观察（纯读）",
+        "action" => "动作（只做）",
+        "gate" => "判据（Gate）",
+        _ => "控制（重试/超时/失败策略）",
+    };
+
+    private void AddSelectedAtom()
+    {
+        if (_palette.SelectedItem is not AtomRow row) return;
+        var s = _draft.Add(row.Def);
+        // 控制类原子是“修饰上一步”的语义，这里直接应用到上一步
+        if (row.Def.Kind == "control" && _draft.Steps.Count >= 2)
+        {
+            var prev = _draft.Steps[^2];
+            ApplyControl(prev, row.Def.Id);
+            _draft.Steps.Remove(s);
+        }
+        _name.Text = _draft.Name;
+        RefreshSteps();
+        _steps.SelectedIndex = _steps.Items.Count - 1;
+    }
+
+    private static void ApplyControl(DraftStep s, string controlId)
+    {
+        switch (controlId)
+        {
+            case "ctl.retry": s.RetryMax = 2; s.RetryIntervalMs = 1500; break;
+            case "ctl.timeout": s.TimeoutSec = 20; break;
+            case "ctl.onfail": s.OnFail = "skip"; break;
+        }
+    }
+
+    // ---------------- 步骤列表 ----------------
+    private void RefreshSteps()
+    {
+        int keep = _steps.SelectedIndex;
+        _steps.Items.Clear();
+        for (int i = 0; i < _draft.Steps.Count; i++)
+            _steps.Items.Add(Describe(i, _draft.Steps[i]));
+        if (keep >= 0 && keep < _steps.Items.Count) _steps.SelectedIndex = keep;
+        else if (_steps.Items.Count > 0) _steps.SelectedIndex = _steps.Items.Count - 1;
+    }
+
+    private static string Describe(int i, DraftStep s)
+    {
+        var def = AtomCatalog.Get(s.AtomId);
+        string title = def?.Title ?? s.AtomId;
+        string detail = s.AtomId switch
+        {
+            "act.tap" => " " + Arg(s, "button", "A"),
+            "act.gesture" => " " + Arg(s, "dir", "up"),
+            "act.menu" => " " + Arg(s, "mode", "open"),
+            "act.tab" => " " + Arg(s, "target", "在线"),
+            "act.navigate" => " " + Arg(s, "name", ""),
+            "act.firewall" => " " + Arg(s, "enable", "true"),
+            "act.sleep" => " " + Arg(s, "ms", "1000") + "ms",
+            _ => "",
+        };
+        string gate = s.Expect.Count > 0 ? "  ⟵ " + string.Join(" && ", s.Expect) : "";
+        string ctl = (s.RetryMax > 1 ? "  [retry" + s.RetryMax + "]" : "")
+                   + (s.TimeoutSec > 0 ? "  [timeout" + s.TimeoutSec + "s]" : "")
+                   + (s.OnFail != "abort" ? "  [onFail=" + s.OnFail + "]" : "");
+        return $"{i + 1}. {title}{detail}{gate}{ctl}";
+    }
+
+    private static string Arg(DraftStep s, string k, string dflt)
+        => s.Args.TryGetValue(k, out var v) ? v : dflt;
+
+    private void MoveStep(int delta)
+    {
+        if (_steps.SelectedItem is null) return;
+        int i = _steps.SelectedIndex;
+        if (i < 0 || i >= _draft.Steps.Count) return;
+        _draft.Move(_draft.Steps[i], delta);
+        RefreshSteps();
+        _steps.SelectedIndex = Math.Clamp(i + delta, 0, _draft.Steps.Count - 1);
+    }
+
+    private void RemoveSelected()
+    {
+        int i = _steps.SelectedIndex;
+        if (i < 0 || i >= _draft.Steps.Count) return;
+        _draft.Remove(_draft.Steps[i]);
+        RefreshSteps();
+    }
+
+    private void ShowStepProps()
+    {
+        int i = _steps.SelectedIndex;
+        if (i < 0 || i >= _draft.Steps.Count) { _props.SelectedObject = null; return; }
+        _props.SelectedObject = new StepEditor(_draft.Steps[i]);
+    }
+
+    private void SyncPropsToStep()
+    {
+        if (_props.SelectedObject is StepEditor ed)
+        {
+            ed.Apply();
+            int i = _steps.SelectedIndex;
+            if (i >= 0 && i < _draft.Steps.Count) RefreshSteps();
+        }
+    }
+
+    // ---------------- 存取 ----------------
+    private void SaveDraft()
+    {
+        using var dlg = new SaveFileDialog
+        {
+            Filter = "流程 JSON|*.json",
+            InitialDirectory = Path.Combine(AppContext.BaseDirectory, "flows"),
+            FileName = string.IsNullOrWhiteSpace(_name.Text) ? "flow.json" : _name.Text + ".json",
+        };
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+        _draft.Name = Path.GetFileNameWithoutExtension(dlg.FileName);
+        _draft.Save(dlg.FileName);
+        _trace.Text = "已保存: " + dlg.FileName + Environment.NewLine + _trace.Text;
+    }
+
+    private void LoadDraft()
+    {
+        using var dlg = new OpenFileDialog { Filter = "流程 JSON|*.json", InitialDirectory = Path.Combine(AppContext.BaseDirectory, "flows") };
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+        var loaded = FlowDraft.Load(dlg.FileName);
+        _draft.Name = loaded.Name;
+        _draft.Description = loaded.Description;
+        _draft.Steps.Clear();
+        _draft.Steps.AddRange(loaded.Steps);
+        _name.Text = _draft.Name;
+        RefreshSteps();
+        _trace.Text = "已打开: " + dlg.FileName + Environment.NewLine + _trace.Text;
+    }
+
+    // ---------------- 回放验收 ----------------
+    private void RefreshReplays()
+    {
+        _replays.Items.Clear();
+        var root = Path.Combine(AppContext.BaseDirectory, "replays");
+        if (Directory.Exists(root))
+            foreach (var f in Directory.EnumerateFiles(root, "script.json", SearchOption.AllDirectories))
+                _replays.Items.Add(Path.GetRelativePath(AppContext.BaseDirectory, f));
+        if (_replays.Items.Count > 0) _replays.SelectedIndex = 0;
+    }
+
+    private void RunReplay()
+    {
+        if (_replays.SelectedItem is not string rel) { _trace.Text = "没有可用的回放脚本"; return; }
+        string script = Path.Combine(AppContext.BaseDirectory, rel);
+        string tmp = Path.Combine(Path.GetTempPath(), "flow_editor_draft.json");
+        _draft.Name = string.IsNullOrWhiteSpace(_name.Text) ? "draft" : _name.Text;
+        _draft.Save(tmp);
+
+        try
+        {
+            var prog = _draft.Compile();
+            var log = new LogBus(Path.Combine(Path.GetTempPath(), "flow_editor.log"));
+            var settings = new AppSettings();
+            var host = new ReplayFlowHost(script, quiet: true);
+            var ocr = AutoPickup.Core.Vision.Ocr.OcrFactory.Create(log);
+            var tab = new AutoPickup.Core.Vision.TabReader(ocr, log, settings);
+            var bank = new AutoPickup.Core.Vision.TemplateBank(log);
+            var rows = new AutoPickup.Core.Vision.FocusRowReader(ocr, log, settings);
+            var reader = new AutoPickup.Core.Vision.ScreenReader(bank, new AutoPickup.Core.Vision.NccMatcher(settings.Vision), ocr, log, settings.Vision);
+            var eng = new FlowEngine(host, log, settings, tab, reader, ocr, rows);
+            var sw = Stopwatch.StartNew();
+            bool ok = eng.Run(prog);
+            sw.Stop();
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine((ok ? "结果: OK" : "结果: FAIL") + "   " + sw.ElapsedMilliseconds + "ms   宿主=" + host.Name);
+            foreach (var t in eng.Trace) sb.AppendLine("  " + t);
+            sb.AppendLine("最终证据: " + eng.Ctx.Snapshot());
+            _trace.Text = sb.ToString();
+        }
+        catch (Exception ex) { _trace.Text = "回放执行出错: " + ex.Message; }
+    }
+
+    // ---------------- 小工具 ----------------
+    private static Panel MkColumn(string title, int width)
+    {
+        var p = new Panel { Dock = DockStyle.Left, Width = width, BackColor = Color.FromArgb(26, 29, 35), Padding = new Padding(2) };
+        var lb = new Label { Text = title, Dock = DockStyle.Top, Height = 22, ForeColor = Color.Gainsboro, BackColor = Color.FromArgb(38, 42, 50), TextAlign = ContentAlignment.MiddleLeft };
+        p.Controls.Add(lb);
+        p.Tag = lb;
+        return p;
+    }
+
+    private static Label MkHint(string text) => new()
+    {
+        Text = text, Dock = DockStyle.Bottom, Height = 34, ForeColor = Color.Gray,
+        BackColor = Color.FromArgb(26, 29, 35), Padding = new Padding(4, 2, 4, 2),
+    };
+
+    private static Button MkBtn(string text, Action onClick)
+    {
+        var b = new Button { Text = text, AutoSize = true, FlatStyle = FlatStyle.Flat, ForeColor = Color.Gainsboro, BackColor = Color.FromArgb(45, 50, 60) };
+        b.Click += (_, _) => onClick();
+        return b;
+    }
+
+    private sealed record AtomRow(AtomDef Def) { public override string ToString() => Def.Title; }
+
+    /// <summary>PropertyGrid 适配：把一步的可编辑字段暴露出来。</summary>
+    private sealed class StepEditor
+    {
+        private readonly DraftStep _s;
+        public StepEditor(DraftStep s) => _s = s;
+
+        [Category("0 基本"), DisplayName("步骤 id")] public string Id { get => _s.Id; set => _s.Id = value; }
+        [Category("0 基本"), DisplayName("备注")] public string Note { get => _s.Note; set => _s.Note = value; }
+        [Category("1 参数"), DisplayName("按下标量(逗号分隔)")] public string Args { get => string.Join(", ", _s.Args.Select(kv => kv.Key + "=" + kv.Value)); }
+
+        [Category("1 参数"), DisplayName("参数1")] public string Arg1 { get => ArgAt(0).Value; set => SetArg(0, value); }
+        [Category("1 参数"), DisplayName("参数2")] public string Arg2 { get => ArgAt(1).Value; set => SetArg(1, value); }
+        [Category("1 参数"), DisplayName("参数3")] public string Arg3 { get => ArgAt(2).Value; set => SetArg(2, value); }
+
+        [Category("2 判据"), DisplayName("执行前断言(require)")] public string Require { get => string.Join(" ; ", _s.Require); set => SetList(_s.Require, value); }
+        [Category("2 判据"), DisplayName("动作后断言(expect)")] public string Expect { get => string.Join(" ; ", _s.Expect); set => SetList(_s.Expect, value); }
+        [Category("2 判据"), DisplayName("要观察的量(observe)")] public string Observe { get => string.Join(", ", _s.Observe); set => SetCsv(_s.Observe, value); }
+
+        [Category("3 策略"), DisplayName("重试次数")] public int RetryMax { get => _s.RetryMax; set => _s.RetryMax = Math.Max(1, value); }
+        [Category("3 策略"), DisplayName("重试间隔ms")] public int RetryIntervalMs { get => _s.RetryIntervalMs; set => _s.RetryIntervalMs = Math.Max(0, value); }
+        [Category("3 策略"), DisplayName("超时秒")] public int TimeoutSec { get => _s.TimeoutSec; set => _s.TimeoutSec = Math.Max(0, value); }
+        [Category("3 策略"), DisplayName("失败策略")] [TypeConverter(typeof(OnFailConverter))] public string OnFail { get => _s.OnFail; set => _s.OnFail = value; }
+
+        public void Apply() { }
+
+        private (string Key, string Value) ArgAt(int i)
+        {
+            var e = _s.Args.ElementAtOrDefault(i);
+            return (e.Key ?? "", e.Value ?? "");
+        }
+
+        private void SetArg(int i, string value)
+        {
+            var list = _s.Args.ToList();
+            if (i >= list.Count) return;
+            var key = list[i].Key;
+            _s.Args[key] = value;
+        }
+
+        private static void SetList(List<string> target, string text)
+        {
+            target.Clear();
+            target.AddRange(text.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).Where(x => x.Length > 0));
+        }
+
+        private static void SetCsv(List<string> target, string text)
+        {
+            target.Clear();
+            target.AddRange(text.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).Where(x => x.Length > 0));
+        }
+    }
+
+    private sealed class OnFailConverter : StringConverter
+    {
+        public override bool GetStandardValuesSupported(ITypeDescriptorContext? c) => true;
+        public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? c)
+            => new(new[] { "abort", "skip", "continue", "rollback" });
+    }
+}

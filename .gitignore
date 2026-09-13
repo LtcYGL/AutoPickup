@@ -1,0 +1,32 @@
+# 构建产物
+bin/
+obj/
+publish/
+dist/
+
+# 本机运行数据
+samples/
+logs/
+frames/
+diag/
+
+# 调试期临时脚本
+run_*.ps1
+kill_ap.ps1
+
+# 不含进仓库的素材（体积大 / 含目标程序界面截图与美术资源）
+# 程序默认用「文字证据」判定状态，模板匹配是可选能力；
+# 若要启用模板匹配，把自己的截图裁剪后放到 assets/templates 即可（会随 exe 内嵌）。
+assets/templates/
+replays/
+1024_768/
+refs/
+
+# 内部操作明细（含大量与具体游戏绑定的细节），不随仓库发布
+docs/OPERATIONS_OCR.md
+
+# 编辑器 / 系统
+.vs/
+.vscode/
+*.swp
+Thumbs.db
