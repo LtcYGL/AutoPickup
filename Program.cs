@@ -27,13 +27,14 @@ internal static class Program
 
         // 单 exe 引导：把内嵌资源（模板/原生 dll/默认流程）释放到 %LOCALAPPDATA%\AutoPickup\，
         // 并注册原生库解析器。放在最前面，保证**所有模式**（GUI/实机/回放/诊断）都能拿到资源。
-        // 幂等：已有文件不覆盖（用户的模板替换/新增不会被冲掉）。
+        // 更新规则见 AssetBootstrap：模板永不覆盖；流程跟着 exe 更新（用户改过的保留）；
+        // 原生库直接更新。这样新版 exe 不会配着旧流程跑。
         try
         {
             string bootDataDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AutoPickup");
             AutoPickup.Core.AssetBootstrap.RegisterNativeResolver(bootDataDir);
-            AutoPickup.Core.AssetBootstrap.ExtractAll(bootDataDir);
+            AutoPickup.Core.AssetBootstrap.ExtractAll(bootDataDir, s => Console.WriteLine("[assets] " + s));
         }
         catch { /* 释放失败不阻断启动；后续按缺失降级 */ }
 

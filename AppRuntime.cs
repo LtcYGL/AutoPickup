@@ -8,6 +8,7 @@ using AutoPickup.Core.Net;
 using AutoPickup.Core.Vision;
 using AutoPickup.Core.Vision.Ocr;
 using AutoPickup.Logging;
+using System.Security.Cryptography;
 
 namespace AutoPickup;
 
@@ -52,7 +53,8 @@ public sealed class AppRuntime : IDisposable
                 if (File.Exists(full))
                 {
                     var f = AutoPickup.Core.Flow.FlowJson.Load(full);
-                    log.Info("原子流程已载入: " + full + "（" + f.Steps.Count + " 步）", "Flow");
+                    log.Info("原子流程已载入: " + full + "（" + f.Steps.Count + " 步，sha256 "
+                        + FlowFileHash(full) + "）", "Flow");
                     return f;
                 }
             }
@@ -60,6 +62,17 @@ public sealed class AppRuntime : IDisposable
         }
         catch (Exception e) { log.Error("载入原子流程失败（将走 legacy）: " + e.Message, "Flow"); }
         return null;
+    }
+
+    /// <summary>流程文件 sha256 前 8 位。日志里带上它，就能一眼确认"跑的是不是这一版流程"。</summary>
+    private static string FlowFileHash(string path)
+    {
+        try
+        {
+            using var fs = File.OpenRead(path);
+            return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant()[..8];
+        }
+        catch { return "?"; }
     }
 
     public string DataDir => Store.DataDir;
@@ -101,6 +114,9 @@ public sealed class AppRuntime : IDisposable
         RowReader = new FocusRowReader(Ocr, log, settings);
         Tab = new TabReader(Ocr, log, settings);
         Machine = new NetmodeMachine(Window, Reader, RowReader, Tab, Input, settings, log);
+
+        // 引导期（资源释放/更新）的提示：日志系统起来后补记一条，方便定位"流程版本不对"
+        foreach (var m in AutoPickup.Core.AssetBootstrap.DrainNotices()) log.Info(m, "Assets");
 
         // 原子引擎（新流程）：与旧 FSM 并存，参数页/流程页可一键切回 legacy
         AtomsFlow = LoadShiftFlow(log);
