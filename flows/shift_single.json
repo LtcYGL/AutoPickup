@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "shift-single",
   "description": "单个班次（原子引擎）：手势优先，失败回退暂停菜单（与旧流程一致）→ 下云cue即刻封网 → 确认到达在线 → 等保存失败 → 回故事（同样手势优先+菜单回退）→ 恢复联网",
   "steps": [
@@ -34,7 +34,7 @@
       "expect": [ "ctx:menuopen eq true" ],
       "timeoutSec": 15,
       "retry": { "max": 2, "intervalMs": 1500 },
-      "onFail": "abort"
+      "onFail": "continue"
     },
     {
       "id": "fb_online_tab",
@@ -57,7 +57,7 @@
       "expect": [ "ctx:focusrow like 进入GTA在线模式" ],
       "timeoutSec": 15,
       "retry": { "max": 3, "intervalMs": 1000 },
-      "onFail": "abort"
+      "onFail": "continue"
     },
     {
       "id": "fb_online_pick",
@@ -140,7 +140,7 @@
       "expect": [ "ctx:toast eq savefail" ],
       "timeoutSec": 60,
       "retry": { "max": 2, "intervalMs": 2000 },
-      "onFail": "continue"
+      "onFail": "abort"
     },
 
     {
@@ -164,7 +164,7 @@
       "expect": [ "ctx:menuopen eq true" ],
       "timeoutSec": 15,
       "retry": { "max": 2, "intervalMs": 1500 },
-      "onFail": "abort"
+      "onFail": "continue"
     },
     {
       "id": "fb_return_tab",
@@ -186,7 +186,7 @@
       "expect": [ "ctx:focusrow like 退至故事模式" ],
       "timeoutSec": 20,
       "retry": { "max": 3, "intervalMs": 1000 },
-      "onFail": "abort"
+      "onFail": "continue"
     },
     {
       "id": "fb_return_go",

@@ -37,6 +37,14 @@ public sealed class FlowContext
 
     public Observed? Get(string name) => _latest.TryGetValue(name, out var o) ? o : null;
 
+    /// <summary>清空证据账本（每轮开始时调用）。</summary>
+    public void Reset()
+    {
+        _history.Clear();
+        _latest.Clear();
+        Facts.Clear();
+    }
+
     /// <summary>当前证据快照（给日志/覆盖层/断言的“为什么”。）</summary>
     public string Snapshot()
     {
@@ -158,7 +166,7 @@ public sealed class FlowEngine
             Ctx.StepIndex = i;
             if (!EvalAll(step.Require, "require", out string reqEv))
             {
-                _log.Info($"[{i}] {Label(step)} 跳过（条件不满足：{reqEv}）", "Flow");
+                _log.Info($"[{i}] {Label(step)} 跳过（条件不满足：{reqEv}）", "Detail");
                 Trace.Add(i + " " + step.Id + " SKIP " + reqEv);
                 continue;
             }
@@ -190,6 +198,21 @@ public sealed class FlowEngine
         return ok;
     }
 
+    /// <summary>按键名翻译成用户看得懂的中文（日志用）。</summary>
+    private static string Btn(string b) => b switch
+    {
+        "Start" => "Start(菜单)",
+        "A" => "A",
+        "B" => "B",
+        "DPadUp" => "方向键上",
+        "DPadDown" => "方向键下",
+        "DPadLeft" => "方向键左",
+        "DPadRight" => "方向键右",
+        "LeftShoulder" => "LB",
+        "RightShoulder" => "RB",
+        _ => b,
+    };
+
     /// <summary>日志用的步骤短标签：优先 title，其次 id。</summary>
     private static string Label(FlowStep step)
         => string.IsNullOrWhiteSpace(step.Title) ? step.Id : step.Title;
@@ -207,7 +230,7 @@ public sealed class FlowEngine
             if (!EvalAll(step.Pre, "pre", out string preEv))
             {
                 last = "pre 未满足: " + preEv;
-                _log.Info($"[{idx}] {Label(step)}（第 {attempt}/{max} 次）{last}", "Flow");
+                _log.Info($"[{idx}] {Label(step)}（第 {attempt}/{max} 次）{last}", "Detail");
                 if (attempt < max) { _host.SleepMs(step.Retry.IntervalMs); continue; }
                 return (false, last);
             }
@@ -319,6 +342,14 @@ public sealed class FlowEngine
 
     // ---------------- 原语 ----------------
 
+    /// <summary>清空本轮证据（事实/历史/轨迹）。**每轮开始必须调用**：否则上一轮的 fact 会残留，
+    /// 既影响日志可读性，也会让 "fact:&lt;step&gt;.ok" 分支读到过期值。</summary>
+    public void ResetContext()
+    {
+        Ctx.Reset();
+        Trace.Clear();
+    }
+
     /// <summary>清空帧级观察缓存。**长驻采样（影子）每轮必须调用**：缓存键持有整帧字节数组（1080p≈8MB）。</summary>
     public void ResetFrameCache()
     {
@@ -379,7 +410,7 @@ public sealed class FlowEngine
                 {
                     string s = TextMatcher.Clean(tr.StripWords);
                     _log.Info("[observe] tab条词集: " + tr.StripWords + " | 选中=" + (tr.Selected ?? "?")
-                        + " | 白块x " + tr.WhiteX0 + ".." + tr.WhiteX1, "Flow");
+                        + " | 白块x " + tr.WhiteX0 + ".." + tr.WhiteX1, "Detail");
                     var m = DecideMode(tr);
                     mode = m.Value;
                     modeDetail = m.Detail ?? mode;
@@ -467,7 +498,30 @@ public sealed class FlowEngine
         string s = TextMatcher.Clean(tr.StripWords);
         if (s.Contains("简") && s.Contains("讯")) return new Observed("mode", "story", Detail: "词集兜底: " + tr.StripWords);
         if (s.Contains("职") && s.Contains("业")) return new Observed("mode", "online", Detail: "词集兜底: " + tr.StripWords);
+
+        // 4) 横幅文字兜底（“打开暂停菜单看横幅”）：复用现成的横幅带 OCR，不依赖模板。
+        //    仅在“条带里确实出现了 tab 名”时启用——说明眼前确实是暂停菜单，
+        //    避免把加载画面上的标题误判成故事模式（实测加载页也会读到 Grand Theft Auto V）。
+        if (_reader is not null && HasTabName(s))
+        {
+            var rr = _reader.Read(_host.Capture(), withOcr: true, withBanner: true, includeHome: false);
+            if (rr.BannerOcrOnline && !rr.BannerOcrStory)
+                return new Observed("mode", "online", Detail: "横幅文字: " + rr.BannerOcrText);
+            if (rr.BannerOcrStory && !rr.BannerOcrOnline)
+                return new Observed("mode", "story", Detail: "横幅文字: " + rr.BannerOcrText);
+            if (rr.BannerOcrText is not null)
+                return new Observed("mode", "unknown", Detail: "横幅未定案: " + rr.BannerOcrText);
+        }
         return new Observed("mode", "unknown", Detail: "词集未含模式词: " + tr.StripWords);
+    }
+
+    /// <summary>条带里是否出现了已知 tab 名——用来确认“眼前是暂停菜单”而不是加载画面。</summary>
+    private static bool HasTabName(string cleanedStrip)
+    {
+        if (string.IsNullOrEmpty(cleanedStrip)) return false;
+        foreach (var t in new[] { "地图", "简讯", "统计", "设置", "游戏", "在线", "职业", "好友", "信息", "商店" })
+            if (cleanedStrip.Contains(t[0])) return true;
+        return false;
     }
 
     /// <summary>确认弹窗观察：命中退出/切换确认框返回 true。</summary>
@@ -674,10 +728,11 @@ public sealed class FlowEngine
                     _host.Tap(a.Button);
                     if (i + 1 < a.Times) _host.SleepMs(a.Ms);
                 }
-                return new Acted(true, "tap " + a.Button + (a.Times > 1 ? " x" + a.Times : ""));
+                return new Acted(true, "按 " + Btn(a.Button) + (a.Times > 1 ? " ×" + a.Times : ""));
             case "gesture":
                 _host.Gesture(a.Dir);
-                return new Acted(true, "gesture " + a.Dir);
+                return new Acted(true, a.Dir.Equals("down", StringComparison.OrdinalIgnoreCase)
+                    ? "轮盘手势↓（进线上）" : "轮盘手势↑（回故事）");
             case "menu":
             {
                 // 打开/关闭暂停菜单原子。**先看再动**：已开就别按 Start（按了等于关，这正是旧 FSM 的坑）。
@@ -685,14 +740,14 @@ public sealed class FlowEngine
                 string how = a.Mode.ToLowerInvariant();
                 if (how == "close" || (how == "toggle" && open))
                 {
-                    if (!open) return new Acted(true, "menu 已关，无需按 B（不按键）");
+                    if (!open) return new Acted(true, "菜单已关，无需按键");
                     _host.Tap("B");
-                    return new Acted(true, "menu close（先前已开=true）");
+                    return new Acted(true, "关闭暂停菜单（按 B）");
                 }
                 if (open && how == "open")
-                    return new Acted(true, "menu 已开，沿用（不按键）");
+                    return new Acted(true, "菜单已开，沿用（不按键）");
                 _host.Tap("Start");
-                return new Acted(true, "menu open（按 Start，先前已开=" + open + "）");
+                return new Acted(true, "打开暂停菜单（按 Start）");
             }
             case "tab":
             {
@@ -730,16 +785,16 @@ public sealed class FlowEngine
                     if (row is null) return new Acted(false, "读不到焦点行（走不动）");
                     lastSeen = TextMatcher.Clean(row);
                     if (TextMatcher.FuzzyEqual(lastSeen, a.Name))
-                        return new Acted(true, "navigate 到位「" + a.Name + "」（走了 " + steps + " 步）");
+                        return new Acted(true, "焦点已到「" + a.Name + "」（走 " + steps + " 步）");
                     _host.Tap(back);
                     steps++;
                     _host.SleepMs(_settings.Automation.PressMs + 120);
                 }
-                return new Acted(false, "navigate 未走到「" + a.Name + "」（走了 " + steps + " 步，当前「" + lastSeen + "」）");
+                return new Acted(false, "没走到「" + a.Name + "」（走 " + steps + " 步，当前「" + lastSeen + "」）");
             }
             case "sleep":
                 _host.SleepMs(a.Ms);
-                return new Acted(true, "sleep " + a.Ms + "ms");
+                return new Acted(true, "等待 " + (a.Ms / 1000.0).ToString("0.#") + " 秒");
             case "waitmode":
             {
                 // 到达某模式的“探针”原子（对应旧流程的 WaitModeReachable）：
@@ -755,7 +810,8 @@ public sealed class FlowEngine
                     if (o.Value == want)
                     {
                         Ctx.Facts["mode_reached"] = "true";
-                        return new Acted(true, "waitmode 到达 " + want + "（" + (int)sw.Elapsed.TotalSeconds + "s，按 Start " + presses + " 次）");
+                        return new Acted(true, "确认到达" + (want == "story" ? "故事" : "在线")
+                            + "（用时 " + (int)sw.Elapsed.TotalSeconds + "s，按 Start " + presses + " 次）");
                     }
                     bool open = MenuOpenObserved().Value == "true";
                     if (!open)
@@ -767,7 +823,8 @@ public sealed class FlowEngine
                     else _host.SleepMs(1200);   // 已开但条带没出字：短等重读，不按键
                 }
                 Ctx.Facts["mode_reached"] = "false";
-                return new Acted(false, "waitmode 未到达 " + want + "（超时 " + timeoutSec + "s，按 Start " + presses + " 次）");
+                return new Acted(false, "未确认到达" + (want == "story" ? "故事" : "在线")
+                    + "（超时 " + timeoutSec + "s，按 Start " + presses + " 次）");
             }
             case "waitcue":
             {
@@ -792,11 +849,11 @@ public sealed class FlowEngine
                 bool ok = _host.Firewall(a.Enable);
                 // 结果记成事实，方便 Gate 用 "fact:firewall eq true" 引用
                 Ctx.Facts["firewall"] = (ok && a.Enable) ? "true" : "false";
-                return new Acted(ok, "firewall " + (a.Enable ? "enable" : "disable") + (ok ? "" : "(失败/回放忽略)"));
+                return new Acted(ok, (a.Enable ? "已封网" : "已恢复联网") + (ok ? "" : " —— 失败/忽略"));
             case "check":
                 return new Acted(true, "check");
             default:
-                return new Acted(true, "noop");
+                return new Acted(true, "仅观察，不动作");
         }
     }
 }

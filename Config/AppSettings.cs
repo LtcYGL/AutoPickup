@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 
 namespace AutoPickup.Config;
 
@@ -245,6 +245,9 @@ public sealed class AppSettings
 
         [Category("8 班次")] [DisplayName("轮间停留(s)")] [Description("回到线下后、下一轮之前的停留，默认 10s")]
         public int BetweenHoldSec { get; set; } = 10;
+
+        [Category("8 班次")] [DisplayName("单轮重试次数")] [Description("某一轮没完成时先恢复同步再重试的次数，默认 2；用完仍失败则记录并继续下一轮（只有“没读到保存失败”才会停止整批）")]
+        public int RoundRetries { get; set; } = 2;
 
         [Category("8 班次")] [DisplayName("流程引擎")] [Description("atoms=用新的原子引擎跑班次（推荐）；legacy=旧的死流程（一键回退用）")]
         public string Engine { get; set; } = "atoms";

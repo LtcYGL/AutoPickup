@@ -61,6 +61,7 @@ public sealed class MainForm : Form
     private OverlayForm? _overlay;
     private Button? _btnOverlay;
     private CheckBox? _chkSaveSample;
+    private CheckBox? _chkVerboseLog;
     private Label? _dataInfoLabel;
     private DateTime _dataInfoAt = DateTime.MinValue;
 
@@ -92,6 +93,18 @@ public sealed class MainForm : Form
         logHead.Controls.Add(new Label { Text = "运行日志", ForeColor = Color.FromArgb(215, 222, 232), AutoSize = true, Margin = new Padding(0, 4, 14, 0), Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold) });
         _autoScroll = new CheckBox { Text = "自动滚动", ForeColor = Color.FromArgb(150, 200, 255), Checked = true, AutoSize = true, Margin = new Padding(0, 5, 14, 0) };
         logHead.Controls.Add(_autoScroll);
+        // 底层细节默认不看（OCR 逐次输入、观察词集、跳过的分支…），但**日志文件始终全量记录**，
+        // 出问题时可勾上还原现场。
+        _chkVerboseLog = new CheckBox
+        {
+            Text = "显示底层细节（OCR/观察）",
+            ForeColor = Color.FromArgb(150, 200, 255),
+            Checked = false,
+            AutoSize = true,
+            Margin = new Padding(0, 5, 14, 0),
+        };
+        _chkVerboseLog.CheckedChanged += (_, _) => _logBox?.Clear();
+        logHead.Controls.Add(_chkVerboseLog);
         _btnLogFold = new Button { Text = "收起日志", AutoSize = true, FlatStyle = FlatStyle.System, Margin = new Padding(0, 1, 0, 0) };
         _btnLogFold.Click += (_, _) => ToggleLog();
         logHead.Controls.Add(_btnLogFold);
@@ -1089,9 +1102,17 @@ public sealed class MainForm : Form
         foreach (var c in _actionControls) if (c is not null) c.Enabled = enabled;
     }
 
+    /// <summary>界面日志过滤：只挡掉“底层细节”，文件日志不受影响（排查时勾选“显示底层细节”即可还原）。</summary>
+    private bool ShowInLogView(LogEntry entry)
+    {
+        if (_chkVerboseLog?.Checked == true) return true;
+        return entry.Source is not ("Ocr" or "Detail");
+    }
+
     private void OnLogEntry(LogEntry entry)
     {
         if (InvokeRequired) { BeginInvoke(() => OnLogEntry(entry)); return; }
+        if (!ShowInLogView(entry)) return;
         Color lv = entry.Level switch
         {
             LogLevel.Okay => Color.FromArgb(122, 224, 132),
