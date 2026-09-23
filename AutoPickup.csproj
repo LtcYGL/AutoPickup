@@ -10,15 +10,18 @@
     <RootNamespace>AutoPickup</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <PlatformTarget>x64</PlatformTarget>
-    <Version>0.6.2</Version>
+    <Version>0.7.2</Version>
   </PropertyGroup>
 <ItemGroup>
-    <!-- 模板 / 原生 dll / 默认流程全部**内嵌进 exe**（单文件分发）；
-         首次运行由 AssetBootstrap 释放到 %LOCALAPPDATA%\AutoPickup\，不覆盖用户已有文件。
+    <!-- 原生 dll + 三条运行流程**内嵌进 exe**（单文件分发）；首次运行由 AssetBootstrap 释放到
+         %LOCALAPPDATA%\AutoPickup\，带版本标记地更新（用户改过的保留），不覆盖用户模板/资源。
+         assets\templates 是可选模板库（模式判定默认走文字证据，不依赖模板），发布时不编入单文件。
          开发期仍复制一份到输出目录，便于命令行工具直接使用。 -->
     <EmbeddedResource Include="assets\templates\**\*.jpg" LogicalName="templates.%(Filename)%(Extension)" />
     <EmbeddedResource Include="assets\native\ViGEmClient.dll" LogicalName="native.ViGEmClient.dll" />
     <EmbeddedResource Include="flows\shift_single.json" LogicalName="flows.shift_single.json" />
+    <EmbeddedResource Include="flows\go_online.json" LogicalName="flows.go_online.json" />
+    <EmbeddedResource Include="flows\return_story.json" LogicalName="flows.return_story.json" />
     <None Include="assets\native\ViGEmClient.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="flows\**\*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

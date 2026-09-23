@@ -1,6 +1,4 @@
 using AutoPickup.Config;
-using AutoPickup.Core.Fsm;
-using AutoPickup.Core.Audio;
 using AutoPickup.Core.Net;
 using AutoPickup.Logging;
 
@@ -15,34 +13,28 @@ namespace AutoPickup.Core.Jobs;
 /// </summary>
 public sealed class ShiftOrchestrator
 {
-    private readonly NetmodeMachine _machine;
     private readonly FirewallController _fw;
-    private readonly IAudioCueSource _audio;
     private readonly AppSettings _settings;
     private readonly LogBus _log;
     private readonly AutoPickup.Core.Flow.FlowEngine? _atoms;
     private readonly AutoPickup.Core.Flow.FlowProgram? _atomsFlow;
+    /// <summary>“回到线下”流程：失败轮/停止/致命停批时的安全收尾用（先回线下、再解封）。</summary>
+    private readonly AutoPickup.Core.Flow.FlowProgram? _returnFlow;
 
-    public ShiftOrchestrator(NetmodeMachine machine, FirewallController fw, IAudioCueSource audio,
-        AppSettings settings, LogBus log,
-        AutoPickup.Core.Flow.FlowEngine? atoms = null, AutoPickup.Core.Flow.FlowProgram? atomsFlow = null)
+    public ShiftOrchestrator(FirewallController fw, AppSettings settings, LogBus log,
+        AutoPickup.Core.Flow.FlowEngine? atoms = null, AutoPickup.Core.Flow.FlowProgram? atomsFlow = null,
+        AutoPickup.Core.Flow.FlowProgram? returnFlow = null)
     {
-        _machine = machine;
         _fw = fw;
-        _audio = audio;
         _settings = settings;
         _log = log;
         _atoms = atoms;
         _atomsFlow = atomsFlow;
+        _returnFlow = returnFlow;
     }
 
-    /// <summary>当前是否走原子引擎（新流程）。缺流程或设置成 legacy 时回退旧流程。</summary>
-    public bool UsingAtoms =>
-        _settings.Shift.Engine.Equals("atoms", StringComparison.OrdinalIgnoreCase)
-        && _atoms is not null && _atomsFlow is not null;
-
-    /// <summary>执行 shift 轮次。中断条件：轮数用完或某一关键腿失败。</summary>
-    public bool RunShifts(int count, bool stayOnlineAfterFinished = false, Func<bool>? stopRequested = null)
+    /// <summary>执行 shift 轮次。中断条件：轮数用完、用户停止、或出现整批致命（没读到“保存失败”）。</summary>
+    public bool RunShifts(int count, Func<bool>? stopRequested = null)
     {
         var s = _settings.Shift;
         if (stopRequested?.Invoke() == true)
@@ -50,12 +42,17 @@ public sealed class ShiftOrchestrator
             _log.Warn("已请求停止，班次未启动", "Job");
             return false;
         }
+        if (_atoms is null || _atomsFlow is null)
+        {
+            _log.Error("未载入原子流程（flows/shift_single.json），无法开始班次", "Job");
+            return false;
+        }
         if (s.WaitStartMins > 0)
         {
             _log.Hint("启动前等待 " + s.WaitStartMins + " 分钟（玩家设定）…", "Job");
             if (!WaitMinutes(s.WaitStartMins, stopRequested))
             {
-                RecoverSafe();
+                ReleaseNetwork();
                 return false;
             }
         }
@@ -66,55 +63,41 @@ public sealed class ShiftOrchestrator
             if (stopRequested?.Invoke() == true)
             {
                 _log.Warn("用户请求停止（轮次间安全退出），先回线下并恢复联网", "Job");
-                RecoverSafe();
+                RecoverToStory();
                 return false;
             }
             int round = i + 1;
             _log.Hint("==== 班次 [" + round + "/" + count + "] ====", "Job");
 
-            // 旧流程：保持原行为（一次失败即中止），只作为回退路径
-            if (!UsingAtoms)
+            // 只有“没读到保存失败”才是整批致命；其余算单轮失败——重试后继续下一轮
+            int tries = 1 + Math.Max(0, s.RoundRetries);
+            bool ok = false, fatal = false;
+            for (int t = 1; t <= tries; t++)
             {
-                if (!RunOneShift())
+                if (t > 1)
                 {
-                    _log.Warn("第 " + round + " 轮失败，中止（旧流程策略）", "Job");
-                    RecoverSafe();
-                    return false;
+                    _log.Hint("第 " + round + " 轮重试（第 " + t + "/" + tries + " 次），先恢复同步…", "Job");
+                    RecoverToStory();
                 }
+                (ok, fatal) = RunOneShiftAtoms();
+                if (ok || fatal) break;
             }
-            else
+            if (fatal)
             {
-                // 新流程：只有“没读到保存失败”才是整批致命；其余算单轮失败——重试后继续下一轮
-                int tries = 1 + Math.Max(0, s.RoundRetries);
-                bool ok = false, fatal = false;
-                for (int t = 1; t <= tries; t++)
-                {
-                    if (t > 1)
-                    {
-                        _log.Hint("第 " + round + " 轮重试（第 " + t + "/" + tries + " 次），先恢复同步…", "Job");
-                        RecoverSafe();
-                    }
-                    (ok, fatal) = RunOneShiftAtoms();
-                    if (ok || fatal) break;
-                }
-                if (fatal)
-                {
-                    _log.Error("第 " + round + " 轮未读到“保存失败”提示 → 到货可能已上传云存档，继续跑没有意义，停止本次班次", "Job");
-                    RecoverSafe();
-                    return false;
-                }
-                if (!ok)
-                {
-                    failedRounds.Add(round);
-                    _log.Warn("第 " + round + " 轮未完成（不中止，继续下一轮）", "Job");
-                }
+                _log.Error("第 " + round + " 轮既没读到“已获取”（到货）也没读到“保存失败” → 可能已上传云存档或本轮没到货，停止本次班次", "Job");
+                RecoverToStory();
+                return false;
+            }
+            if (!ok)
+            {
+                failedRounds.Add(round);
+                _log.Warn("第 " + round + " 轮未完成（不中止，继续下一轮）", "Job");
+                // 失败轮可能停在线上任意位置：先回线下、再解封，别让下一轮从半路开始，
+                // 也别在还在线时解封把没存上的存档补传上去。
+                _log.Hint("失败轮收尾：先回线下，再恢复联网…", "Job");
+                RecoverToStory();
             }
 
-            if (stayOnlineAfterFinished && i == count - 1)
-            {
-                _log.Hint("最后一轮留在线（-o），跳过回线下", "Job");
-                return failedRounds.Count == 0;
-            }
             if (stopRequested is not null)
             {
                 for (int k = 0; k < s.BetweenHoldSec && stopRequested() != true; k++) Thread.Sleep(1000);
@@ -132,45 +115,8 @@ public sealed class ShiftOrchestrator
         return false;
     }
 
-    /// <summary>旧死流程跑一轮（仅在参数页把“流程引擎”改为 legacy 时使用）。</summary>
-    private bool RunOneShift()
-    {
-        var s = _settings.Shift;
-        // 0) 联网（规则禁用）
-        if (s.UseFirewall) _fw.Disable();
-        // 1) 进在线·仅限邀请；期间在“下云”声音临界点立即封云存档（onCloudCue 回调）
-        bool cueHit = false;
-        if (!_machine.EnsureOnlineInvite(timeoutSec: 300, audio: _audio,
-                onCloudCue: () => { if (s.UseFirewall) { _fw.Enable(); cueHit = true; } }, waitCue: s.UseFirewall))
-        {
-            _log.Warn("进入在线失败", "Job");
-            return false;
-        }
-        // 2) 兜底：若 cue 未命中则到达后补封（此时云存档可能已提交，警告）
-        if (s.UseFirewall)
-        {
-            if (!cueHit)
-            {
-                _log.Warn("下云 cue 未命中，已在线上（fallback 补封云存档）", "Job");
-                _fw.Enable();
-            }
-            // 3) 验证“保存失败”提示
-            _machine.WaitForSaveFailToast(s.SaveFailWaitSec);
-        }
-        // 4) 回线下（故事），成功即代表本轮到货已结算/下次可重领
-        if (!_machine.EnsureStory())
-        {
-            _log.Warn("回到故事失败", "Job");
-            return false;
-        }
-        // 5) 回线下后恢复联网
-        if (s.UseFirewall) _fw.Disable();
-        return true;
-    }
-
     /// <summary>
-    /// 原子引擎跑一轮：动作只做、判据另挂、每步都有证据。失败即返回 false，由外层 RecoverSafe 收尾。
-    /// 想退回旧死流程：参数页「8 班次 · 流程引擎」改 legacy（或流程页取消勾选）。
+    /// 原子引擎跑一轮：动作只做、判据另挂、每步都有证据。失败即返回 false，由外层 RecoverToStory 收尾。
     /// </summary>
     private (bool Ok, bool Fatal) RunOneShiftAtoms()
     {
@@ -184,7 +130,7 @@ public sealed class ShiftOrchestrator
             sw.Stop();
 
             // 整批致命：本轮没读到“保存失败”提示（= 到货已上传云存档）
-            bool fatal = !ok && eng.Ctx.Facts.TryGetValue("wait_savefail.ok", out var sf) && sf == "false";
+            bool fatal = !ok && eng.Ctx.Facts.TryGetValue("wait_hint.ok", out var sf) && sf == "false";
 
             string summary = GoalSummary(eng, sw.Elapsed);
             if (ok) _log.Okay("本轮完成：" + summary, "Job");
@@ -207,22 +153,46 @@ public sealed class ShiftOrchestrator
     }
 
     /// <summary>把本轮的四个目标翻译成人话：进线上 / 封网 / 保存失败 / 回线下。</summary>
-    private static string GoalSummary(AutoPickup.Core.Flow.FlowEngine eng, TimeSpan elapsed)
+    private string GoalSummary(AutoPickup.Core.Flow.FlowEngine eng, TimeSpan elapsed)
     {
         string Mark(string step)
             => eng.Ctx.Facts.TryGetValue(step + ".ok", out var v) && v == "true" ? "✓" : "✗";
         string cue = eng.Ctx.Facts.TryGetValue("cue", out var c) && c == "true" ? "✓" : "✗";
+        // 封网：启用封网时看 block_cloud 的**真实结果**（fact:blocked，末尾解封不会覆盖它）；
+        // 未启用封网时沿用 cue 的“跳过”语义，不显示成失败。原来这里一律用 cue，netsh 真失败也会显示 ✓。
+        string block = _settings.Shift.UseFirewall
+            ? (eng.Ctx.Facts.TryGetValue("blocked", out var b) && b == "true" ? "✓" : "✗")
+            : cue;
         return "进线上" + Mark("wait_online")
-             + " · 封网" + cue
-             + " · 保存失败" + Mark("wait_savefail")
+             + " · 封网" + block
+             + " · 到货/保存失败" + Mark("wait_hint")
              + " · 回线下" + Mark("wait_story")
              + "（用时 " + (int)elapsed.TotalMinutes + "分" + elapsed.Seconds.ToString("D2") + "秒）";
     }
 
-    private void RecoverSafe()
+    /// <summary>安全收尾：**先回线下、再解封**（顺序不能反）。在线状态下解封会让游戏立刻把没上传成功的
+    /// 存档补传上去，把本轮的货记到云上；gtaz 参考实现的铁律也是“解封只发生在回线下之后”。
+    /// 回线下走 flows/return_story.json（与班次主流程同一套原子）；无论成功与否最后一定解封，
+    /// 绝不把用户留在封网状态。</summary>
+    private void RecoverToStory()
+    {
+        try
+        {
+            if (_returnFlow is not null && _atoms is not null)
+            {
+                _atoms.ResetContext();
+                _atoms.Run(_returnFlow);
+            }
+            else _log.Warn("未载入 flows/return_story.json，跳过回线下（只做解封）", "Job");
+        }
+        catch (Exception e) { _log.Warn("回线下收尾异常: " + e.Message, "Job"); }
+        ReleaseNetwork();
+    }
+
+    /// <summary>只恢复联网（已经在理想位置时用，不去动游戏）。</summary>
+    private void ReleaseNetwork()
     {
         try { _fw.Disable(); } catch { }
-        try { _machine.EnsureStory(timeoutSec: 120, allowQuick: false); } catch { }
     }
 
     private bool WaitMinutes(int minutes, Func<bool>? stopRequested = null)

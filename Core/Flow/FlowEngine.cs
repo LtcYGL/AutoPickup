@@ -1,6 +1,5 @@
 using AutoPickup.Config;
 using AutoPickup.Core.Capture;
-using AutoPickup.Core.Fsm;
 using AutoPickup.Core.Input;
 using AutoPickup.Core.Menus;
 using AutoPickup.Core.Vision;
@@ -12,7 +11,6 @@ namespace AutoPickup.Core.Flow;
 /// <summary>流程运行时的证据账本：任何一步的观察结果都进这里，后续任何 Gate 都能引用“之前任意一步的证据”。</summary>
 public sealed class FlowContext
 {
-    private readonly List<Observed> _history = new();
     private readonly Dictionary<string, Observed> _latest = new(StringComparer.OrdinalIgnoreCase);
 
     public string LastRule = "";
@@ -20,19 +18,10 @@ public sealed class FlowContext
     public int Attempt;
     public Dictionary<string, string> Facts { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public IReadOnlyList<Observed> History => _history;
-
-    /// <summary>历史条数上限：长驻影子每小时采样上千次，历史不能无限涨（每步还挂着证据文本）。</summary>
-    private const int HistoryCap = 240;
-
     public void Record(Observed o)
     {
-        _history.Add(o);
-        if (_history.Count > HistoryCap) _history.RemoveRange(0, _history.Count - HistoryCap);
         _latest[o.Kind] = o;
-        // 同时提供 <kind>.value / <kind>.score 两个便捷键
-        _latest[o.Kind + ".value"] = o;
-        _latest[o.Kind] = o;
+        _latest[o.Kind + ".value"] = o;   // 便捷键：条件里可写 ctx:mode.value
     }
 
     public Observed? Get(string name) => _latest.TryGetValue(name, out var o) ? o : null;
@@ -40,7 +29,6 @@ public sealed class FlowContext
     /// <summary>清空证据账本（每轮开始时调用）。</summary>
     public void Reset()
     {
-        _history.Clear();
         _latest.Clear();
         Facts.Clear();
     }
@@ -74,6 +62,9 @@ public sealed class FlowStep
     /// <summary>动作后断言：不满足则重试，重试用尽按 onFail 处理。</summary>
     public List<Condition> Expect { get; init; } = new();
     public int TimeoutSec { get; init; } = 0;
+    /// <summary>超时改从参数页取：填设置名（目前支持 "SaveFailWaitSec"）时优先用它，为空则用 TimeoutSec。
+    /// 用于“保存失败等待(s)”这种既要在参数页调、又要被流程消费的等待。</summary>
+    public string TimeoutSetting { get; init; } = "";
     public RetrySpec Retry { get; init; } = new();
     public string OnFail { get; init; } = "abort";     // abort | skip | continue | rollback
 }
@@ -92,6 +83,8 @@ public sealed class ActionSpec
     public string Target { get; init; } = "";
     /// <summary>navigate 原子：目标列表项（模糊匹配）</summary>
     public string Name { get; init; } = "";
+    /// <summary>sleep 原子：从参数页按名字取毫秒数（非空时覆盖 Ms），如 "AfterHintWaitSec"（秒制，自动 ×1000）</summary>
+    public string Setting { get; init; } = "";
 }
 
 public sealed class RetrySpec
@@ -128,18 +121,27 @@ public sealed class FlowEngine
     public List<string> Trace { get; } = new();
 
     // 同一帧的观察结果缓存：①避免同一帧反复付出 OCR/匹配代价 ②让“观察必须纯”的契约可被验证
-    // ③缓存命中后可安全并行（只读同一份结果）。键用帧数组引用 + 尺寸。
-    private readonly Dictionary<(byte[] Bgra, int W, int H, bool Ocr), FrameObs> _frameCache = new();
+    // ③缓存命中后可安全并行（只读同一份结果）。
+    // **键用帧序号（Frame.Seq）**：以前用 Bgra 数组引用，而每次抓帧都是新数组 → 永远不命中，
+    // 同一帧被 tab条/整帧/中央弹窗 反复 OCR。现在同一次抓帧的多次观察共用一份结果。
+    private readonly Dictionary<(long Seq, int W, int H), FrameObs> _frameCache = new();
     private readonly ReaderWriterLockSlim _cacheLock = new();
     /// <summary>单飞锁：同一帧的观察只由一条线程构建（OCR 引擎非线程安全）。</summary>
     private readonly object FrameObsLock = new();
     /// <summary>列表行 OCR 兜底开关（默认关，见 FocusRowObserved 注释）。</summary>
     public bool AllowRowFallback { get; set; }
 
-    private sealed record FrameObs(string Mode, string ModeDetail, bool MenuOpen, bool MenuFast,
-        bool Dialog, string DialogDetail)
+    /// <summary>一帧的观察结果。中央弹窗判据**按需计算**（见 EnsureDialog）：探针循环只关心模式/菜单，
+    /// 不该为每帧多付一次 2.5MP 的弹窗 OCR。</summary>
+    private sealed class FrameObs
     {
-        public string ModeValue => Mode;
+        public string Mode = "unknown";
+        public string ModeDetail = "tab 条读不到";
+        public bool MenuFast;
+        public bool MenuOpen;
+        public bool Dialog;
+        public string DialogDetail = "未见确认弹窗";
+        public bool DialogDone;
     }
 
     public FlowEngine(IFlowHost host, LogBus log, AppSettings settings,
@@ -149,6 +151,7 @@ public sealed class FlowEngine
         _host = host;
         _log = log;
         _settings = settings;
+        LikeThreshold = settings.Vision.LikeThreshold;   // like 判据门限走参数页
         _tab = tab;
         _reader = reader;
         _ocr = ocr;
@@ -220,6 +223,7 @@ public sealed class FlowEngine
     private (bool Ok, string Why) RunStep(int idx, FlowStep step)
     {
         int max = Math.Max(1, step.Retry.Max);
+        int to = TimeoutOf(step);
         string last = "";
         for (int attempt = 1; attempt <= max; attempt++)
         {
@@ -239,17 +243,21 @@ public sealed class FlowEngine
             var acted = Do(step.Action);
             _log.Info($"[{idx}] {Label(step)}" + (attempt > 1 ? "（第 " + attempt + "/" + max + " 次）" : "") + "：" + acted.Detail, "Flow");
 
-            // 3) 断言（必要时在超时窗口内反复重新观察）
+            // 3) 断言：**先观察再等**（原来先固定睡 500ms——既是固定开销，又让发现晚半秒），
+            //    未满足时在超时窗口内每 400ms 重观察一次。
             var sw = System.Diagnostics.Stopwatch.StartNew();
             bool ok;
             string ev;
-            do
+            while (true)
             {
-                if (step.TimeoutSec > 0) _host.SleepMs(Math.Min(500, step.TimeoutSec * 1000));
                 foreach (var name in step.Observe) Observe(name);
                 ok = EvalAll(step.Expect, "expect", out ev);
                 if (ok) break;
-            } while (step.TimeoutSec > 0 && sw.ElapsedMilliseconds < step.TimeoutSec * 1000);
+                if (to <= 0) break;
+                long remain = to * 1000L - sw.ElapsedMilliseconds;
+                if (remain <= 0) break;
+                _host.SleepMs((int)Math.Min(400, remain));
+            }
 
             if (ok)
             {
@@ -261,6 +269,32 @@ public sealed class FlowEngine
         }
         return (false, last);
     }
+
+    /// <summary>本步有效超时（秒）：TimeoutSetting 指定的参数页值优先，否则用 JSON 里的 timeoutSec。</summary>
+    private int TimeoutOf(FlowStep step)
+    {
+        if (!string.IsNullOrWhiteSpace(step.TimeoutSetting))
+        {
+            int v = SettingSec(step.TimeoutSetting);
+            if (v > 0) return v;
+        }
+        return Math.Max(0, step.TimeoutSec);
+    }
+
+    /// <summary>按名字从参数页取“秒”值（名字不认识=0）。用于超时判定。</summary>
+    private int SettingSec(string name) => name.ToLowerInvariant() switch
+    {
+        "savefailwaitsec" => Math.Max(5, _settings.Shift.SaveFailWaitSec),
+        _ => 0,
+    };
+
+    /// <summary>按名字从参数页取“毫秒”值（名字不认识=0）。**秒制参数在这里 ×1000**，避免单位错配
+    /// （踩过：AfterHintWaitSec=6 直接当毫秒用 → 实际只等了 6ms，日志显示“等待 0 秒”）。</summary>
+    private int SettingMs(string name) => name.ToLowerInvariant() switch
+    {
+        "afterhintwaitsec" => Math.Clamp(_settings.Shift.AfterHintWaitSec, 0, 3600) * 1000,
+        _ => 0,
+    };
 
     private void RunSteps(List<FlowStep> steps, string label)
     {
@@ -317,6 +351,10 @@ public sealed class FlowEngine
         else return CheckResult.Fail("未知条件类型" + c.Kind);
 
         string want = c.Value ?? "";
+        // 数值比较：**用不变文化的 TryParse**。原来直接 double.Parse——区域设置把小数点当千分位时会解析错，
+        // 值非法（流程写错）时还会抛 FormatException 把整轮打成“引擎异常”。
+        bool numOk = double.TryParse(want, System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out double wantNum);
         bool ok = c.Op.ToLowerInvariant() switch
         {
             "eq" => string.Equals(actual, want, StringComparison.OrdinalIgnoreCase),
@@ -331,10 +369,10 @@ public sealed class FlowEngine
             "like" => actual is not null && want.Length > 0 && Overlap(NoSpace(actual), NoSpace(want)) >= LikeThreshold,
             "truthy" => actual is not null && !actual.Equals("false", StringComparison.OrdinalIgnoreCase) && actual != "0",
             "falsy" => actual is null || actual.Equals("false", StringComparison.OrdinalIgnoreCase) || actual == "0",
-            "gt" => num.HasValue && num.Value > double.Parse(want),
-            "ge" => num.HasValue && num.Value >= double.Parse(want),
-            "lt" => num.HasValue && num.Value < double.Parse(want),
-            "le" => num.HasValue && num.Value <= double.Parse(want),
+            "gt" => num.HasValue && numOk && num.Value > wantNum,
+            "ge" => num.HasValue && numOk && num.Value >= wantNum,
+            "lt" => num.HasValue && numOk && num.Value < wantNum,
+            "le" => num.HasValue && numOk && num.Value <= wantNum,
             _ => false,
         };
         return ok ? CheckResult.Pass(actual ?? "null") : CheckResult.Fail(actual ?? "null");
@@ -380,78 +418,101 @@ public sealed class FlowEngine
     }
 
     /// <summary>
-    /// 同一帧的三种独立观察（tab 条 / 中央弹窗 / 画面分类）一次并行算完并缓存：
-    /// ①省掉同帧重复 OCR 与匹配；②并行利用多核（Windows OCR + 模板匹配 + 区域裁剪互不依赖）。
+    /// 同一帧的观察（tab 条 / 画面分类 / 菜单）一次算完并缓存；中央弹窗按需（见 EnsureDialog）。
     /// 纯读语义不变：缓存只存结果，不改变游戏状态。
     /// </summary>
-    private FrameObs GetFrameObs()
+    private FrameObs GetFrameObs(Frame? frame = null)
     {
-        var f = _host.Capture();
-        var key = (f.Bgra, f.Width, f.Height, true);
-        _cacheLock.EnterReadLock();
-        try { if (_frameCache.TryGetValue(key, out var hit)) return hit; }
-        finally { _cacheLock.ExitReadLock(); }
+        var f = frame ?? _host.Capture();
+        long seq = f.Seq;
+        var key = (seq, f.Width, f.Height);
+        if (seq > 0)
+        {
+            _cacheLock.EnterReadLock();
+            try { if (_frameCache.TryGetValue(key, out var hit)) return hit; }
+            finally { _cacheLock.ExitReadLock(); }
+        }
 
         string mode = "unknown", modeDetail = "tab 条读不到";
-        bool menuFast = false, dialog = false;
-        string dialogDetail = "未见确认弹窗";
+        bool menuFast = false;
 
-        // 注意：WindowsOcrEngine 是**单实例非线程安全**（并行跑 tab 条与中央弹窗 OCR 会互相干扰，
-        // 实测立刻退化成 unknown）。所以观察串行；省时间靠“同一帧只算一次”的缓存，而不是并行 OCR。
-        // 需要并行时只能并行“不含 OCR”的部分，或给每个观察独立 OCR 引擎实例。
-        var obsLock = FrameObsLock;
-        lock (obsLock)
+        // 注意：WindowsOcrEngine 是**单实例非线程安全**，所以观察串行；省时间靠“同一帧只算一次”的缓存。
+        lock (FrameObsLock)
         {
             if (_tab is not null)
             {
-                menuFast = _tab.IsTabStripPresent(f);
                 var tr = _tab.Read(f);
                 if (tr is { StripWords.Length: > 2 })
                 {
                     string s = TextMatcher.Clean(tr.StripWords);
                     _log.Info("[observe] tab条词集: " + tr.StripWords + " | 选中=" + (tr.Selected ?? "?")
                         + " | 白块x " + tr.WhiteX0 + ".." + tr.WhiteX1, "Detail");
-                    var m = DecideMode(tr);
+                    var m = DecideMode(tr, f);
                     mode = m.Value;
                     modeDetail = m.Detail ?? mode;
+                    menuFast = true;      // Read 已拿到词集，等价于原来的“条带快检命中”
+                }
+                else
+                {
+                    // 只有 Read 没拿到词集时才补一次条带快检（原来是每帧都跑，白付一遍条带 OCR）
+                    menuFast = _tab.IsTabStripPresent(f);
                 }
             }
-            if (_reader is not null)
-            {
-                string? t = _reader.ScanCenterDialog(f);
-                dialog = t is not null && DialogWords(t);
-                dialogDetail = dialog ? "中央弹窗命中退出/切换确认" : "未见确认弹窗";
-
-            }
         }
 
-        var obs = new FrameObs(mode, modeDetail, menuFast || mode is "story" or "online", menuFast, dialog, dialogDetail);
-        _cacheLock.EnterWriteLock();
-        try
+        var obs = new FrameObs
         {
-            // 实时采样时每帧都是新数组，缓存必须封顶，否则会一直涨（1920x1080 一帧≈8MB）。
-            // 只需覆盖“同一帧被多次观察”，回放时脚本帧也少，3 条足够；超了整体清空。
-            if (_frameCache.Count >= 3) _frameCache.Clear();
-            _frameCache[key] = obs;
+            Mode = mode,
+            ModeDetail = modeDetail,
+            MenuFast = menuFast,
+            MenuOpen = menuFast || mode is "story" or "online",
+        };
+        if (seq > 0)
+        {
+            _cacheLock.EnterWriteLock();
+            try
+            {
+                // 实时采样每帧序号都不同，缓存必须封顶（1080p 一帧≈8MB）；只需覆盖“同一帧被多次观察”。
+                if (_frameCache.Count >= 4) _frameCache.Clear();
+                _frameCache[key] = obs;
+            }
+            finally { _cacheLock.ExitWriteLock(); }
         }
-        finally { _cacheLock.ExitWriteLock(); }
         return obs;
     }
 
+    /// <summary>中央弹窗判据（按需计算、同一帧只算一次）：命中退出/切换确认框返回 true。
+    /// 探针循环只关心模式/菜单，不该为每帧多付一次 2.5MP 的弹窗 OCR。</summary>
+    private bool EnsureDialog(FrameObs o, Frame f)
+    {
+        if (o.DialogDone) return o.Dialog;
+        lock (FrameObsLock)
+        {
+            if (!o.DialogDone)
+            {
+                string? t = _reader!.ScanCenterDialog(f);
+                o.Dialog = t is not null && DialogWords(t);
+                o.DialogDetail = o.Dialog ? "中央弹窗命中退出/切换确认" : "未见确认弹窗";
+                o.DialogDone = true;
+            }
+        }
+        return o.Dialog;
+    }
+
     /// <summary>菜单是否已开：条带快检为主，另用“tab 词集是否含模式词”作旁证（区域参数漂移时更稳）。</summary>
-    private Observed MenuOpenObserved()
+    private Observed MenuOpenObserved(Frame? f = null)
     {
         if (_tab is null) return new Observed("menuopen", "false", Detail: "无 TabReader");
-        var o = GetFrameObs();
+        var o = GetFrameObs(f);
         return new Observed("menuopen", o.MenuOpen ? "true" : "false",
             Detail: "条带快检=" + o.MenuFast + " 模式=" + o.Mode + " (" + o.ModeDetail + ")");
     }
 
     /// <summary>模式观察：只有 tab 条读到词证才给 story/online，否则 unknown（三值，不再强行二分）。</summary>
-    private Observed ModeObserved()
+    private Observed ModeObserved(Frame? f = null)
     {
         if (_tab is null) return new Observed("mode", "unknown", Detail: "无 TabReader");
-        var o = GetFrameObs();
+        var o = GetFrameObs(f);
         return new Observed("mode", o.Mode, Detail: o.ModeDetail);
     }
 
@@ -462,23 +523,17 @@ public sealed class FlowEngine
     /// 3) 都没有才退回“词集里出现即算”的旧逻辑。
     /// 之所以不能只按词序：实机实测 tab 条里**同时**会出现“简讯”和“职业”（列表/子菜单文字被卷进条带）。
     /// </summary>
-    private Observed DecideMode(TabRead tr)
+    private Observed DecideMode(TabRead tr, Frame f)
     {
         string sel = TextMatcher.Clean(tr.Selected ?? "");
         if (sel.Contains("简") || sel.Contains("讯")) return new Observed("mode", "story", Detail: "选中tab=" + tr.Selected);
         if (sel.Contains("职") || sel.Contains("业") || sel.Contains("线")) return new Observed("mode", "online", Detail: "选中tab=" + tr.Selected);
 
-        if (tr.WhiteX0 >= 0 && tr.WhiteX1 > tr.WhiteX0 && _ocr is not null)
+        if (tr.WhiteX0 >= 0 && tr.WhiteX1 > tr.WhiteX0 && tr.Words.Count > 0)
         {
-            var f = _host.Capture();
-            // 统一走“工作像素预算”再 OCR（与 TabReader/Reader 同一条路），词框按同一系数还原
-            var g = Imaging.BgraToGray(f.Bgra, f.Width, f.Height);
-            var prep = OcrPrep.ForFullFrame(g, f.Width, f.Height, _settings.Vision);
-            double kk = prep.Resized ? prep.Scale : 1.0;
-            var rawW = _ocr.RecognizeWords(ToBgra(prep.Gray), prep.Width, prep.Height);
-            var words = rawW.Select(w => new OcrWord(w.Text,
-                (int)Math.Round(w.X1 / kk), (int)Math.Round(w.Y1 / kk),
-                (int)Math.Round(w.X2 / kk), (int)Math.Round(w.Y2 / kk))).ToList();
+            // 直接复用 TabReader.Read 那次整帧 OCR 的词框（原帧坐标、已按工作系数还原）。
+            // 这里原来又跑了一遍整帧 OCR：菜单开着（有白块）时每次观察都白付 ~200ms。
+            var words = tr.Words;
             int center = (tr.WhiteX0 + tr.WhiteX1) / 2;
             int bestD = int.MaxValue; string bestKind = "";
             foreach (var wd in words)
@@ -504,7 +559,7 @@ public sealed class FlowEngine
         //    避免把加载画面上的标题误判成故事模式（实测加载页也会读到 Grand Theft Auto V）。
         if (_reader is not null && HasTabName(s))
         {
-            var rr = _reader.Read(_host.Capture(), withOcr: true, withBanner: true, includeHome: false);
+            var rr = _reader.Read(f, withOcr: true, withBanner: true, includeHome: false);
             if (rr.BannerOcrOnline && !rr.BannerOcrStory)
                 return new Observed("mode", "online", Detail: "横幅文字: " + rr.BannerOcrText);
             if (rr.BannerOcrStory && !rr.BannerOcrOnline)
@@ -528,13 +583,15 @@ public sealed class FlowEngine
     private Observed DialogObserved()
     {
         if (_reader is null) return new Observed("dialog", "false", Detail: "无 Reader");
-        var o = GetFrameObs();
-        return new Observed("dialog", o.Dialog ? "true" : "false", Detail: o.DialogDetail);
+        var f = _host.Capture();
+        var o = GetFrameObs(f);
+        bool d = EnsureDialog(o, f);
+        return new Observed("dialog", d ? "true" : "false", Detail: o.DialogDetail);
     }
 
     /// <summary>
-    /// 左下角提示（toast）观察：裁左下条带 OCR，返回命中的语义标签，便于把“保存失败”这类提示写成 Gate。
-    /// 取值：savefail / cargo（员工已获取）/ sell（已出售）/ levelup / other / none
+    /// 左下角提示（toast）观察：裁左下条带 OCR，返回命中的语义标签，便于把提示写成 Gate。
+    /// 取值：savefail（保存失败）/ cargo（到货：已获取）/ sell（已出售）/ levelup / other / none
     /// </summary>
     private Observed ToastObserved()
     {
@@ -542,16 +599,37 @@ public sealed class FlowEngine
         var t = _reader.ScanToastStrip(_host.Capture());
         if (string.IsNullOrWhiteSpace(t)) return new Observed("toast", "none");
         string q = TextMatcher.Clean(t);
-        // 抗 OCR 错字：不用“整词相等”，改用**关键字符命中数**（实测“保存失败”会被读成“保 荏 矢 败”）
+        // 抗 OCR 错字：不用“整词相等”，改用**关键字符命中**（实测“保存失败”会被读成“保 荏 矢 败”）。
+        // 关键字组来自参数页（“组1|组2|…”：每组都要至少命中一个字）→ 游戏改文案不用重编程序。
         int Hit(params char[] cs) => cs.Count(c => q.Contains(c));
         string kind;
-        if (Hit('保', '存', '荏') >= 1 && Hit('失', '矢', '败') >= 1) kind = "savefail";
-        else if (Hit('员', '工') >= 1 && Hit('获', '取', '得') >= 1) kind = "cargo";
+        if (GroupHit(q, _settings.Vision.ToastSaveFailWords)) kind = "savefail";
+        else if (GroupHit(q, _settings.Vision.ToastCargoWords)) kind = "cargo";
         else if (Hit('出', '售') >= 1 && Hit('已', '出') >= 1) kind = "sell";
         else if (Hit('等', '级', '升') >= 1 && Hit('升', '级') >= 1) kind = "levelup";
         else if (Hit('云', '服', '务', '器') >= 2) kind = "cloud";
         else kind = "other";
         return new Observed("toast", kind, Detail: t.Length > 60 ? t.Substring(0, 60) : t);
+    }
+
+    /// <summary>
+    /// 关键字组命中：spec 形如 “组1|组2|…”（每组是一串字符），要求**每一组都至少命中一个字**。
+    /// 用字符命中而非整词比较，是为了抗 OCR 丢字/错字（实测“保存失败”会读成“保 荏 矢 败”）。
+    /// </summary>
+    private static bool GroupHit(string text, string spec)
+    {
+        if (string.IsNullOrWhiteSpace(spec)) return false;
+        foreach (var group in spec.Split('|'))
+        {
+            bool any = false;
+            foreach (char c in group)
+            {
+                if (char.IsWhiteSpace(c)) continue;
+                if (text.Contains(c)) { any = true; break; }
+            }
+            if (!any) return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -567,7 +645,7 @@ public sealed class FlowEngine
             // **故意不缩到工作分辨率**：这是“什么都读不到”时的诊断手段，准确性优先。
             // 缩到 0.98M 后小字会消失（实测自由漫游帧全帧 0 词、原分辨率能读到 toast 与 HUD）。
             var g = Imaging.BgraToGray(f.Bgra, f.Width, f.Height);
-            var words = _ocr.RecognizeWords(ToBgra(g), f.Width, f.Height);
+            var words = _ocr.RecognizeWords(Imaging.GrayToBgra(g), f.Width, f.Height);
             string s = TextMatcher.Clean(string.Join(" ", words.Select(w => w.Text)));
             return new Observed("text", s, Detail: "原分辨率词数 " + words.Count + " (" + f.Width + "x" + f.Height + ")");
         }
@@ -610,7 +688,7 @@ public sealed class FlowEngine
             if (cw <= 8 || ch <= 8) return null;
             var g = Imaging.BgraToGray(crop, cw, ch);
             var prep = OcrPrep.ForRegionSite(g, cw, ch, "focusrow", v);
-            var words = _ocr?.RecognizeWords(ToBgra(prep.Gray), prep.Width, prep.Height);
+            var words = _ocr?.RecognizeWords(Imaging.GrayToBgra(prep.Gray), prep.Width, prep.Height);
             if (words is null || words.Count == 0) return null;
             double k = prep.Resized ? prep.Scale : 1.0;
             // 列表项都在**左栏**，按行聚类后取“最上面那一行列表项”当焦点候选。
@@ -678,7 +756,7 @@ public sealed class FlowEngine
     /// <summary>去掉空白，供 contains 做“忽略空格”的比较（OCR 会把字拆开/丢空格）。</summary>
     private static string NoSpace(string s) => new(s.Where(c => !char.IsWhiteSpace(c)).ToArray());
 
-    /// <summary>like 判据的重合度阈值（可用参数调；默认 0.6）。</summary>
+    /// <summary>like 判据的重合度阈值（构造时取参数页「模糊匹配阈值(like)」，默认 0.6）。</summary>
     public double LikeThreshold { get; set; } = 0.6;
 
     /// <summary>目标字里落在实测文本中的比例。</summary>
@@ -693,14 +771,6 @@ public sealed class FlowEngine
             if (i >= 0) { hit++; pool.RemoveAt(i); }
         }
         return hit / (double)want.Length;
-    }
-
-    private static byte[] ToBgra(byte[] gray)
-    {
-        var b = new byte[gray.Length * 4];
-        for (int i = 0, j = 0; i < gray.Length; i++, j += 4)
-        { byte v = gray[i]; b[j] = v; b[j + 1] = v; b[j + 2] = v; b[j + 3] = 255; }
-        return b;
     }
 
     private static bool DialogWords(string text)
@@ -793,8 +863,12 @@ public sealed class FlowEngine
                 return new Acted(false, "没走到「" + a.Name + "」（走 " + steps + " 步，当前「" + lastSeen + "」）");
             }
             case "sleep":
-                _host.SleepMs(a.Ms);
-                return new Acted(true, "等待 " + (a.Ms / 1000.0).ToString("0.#") + " 秒");
+            {
+                // setting 非空时毫秒数从参数页取（秒制参数自动 ×1000）；空则用 JSON 里的 ms
+                int ms = string.IsNullOrEmpty(a.Setting) ? a.Ms : SettingMs(a.Setting);
+                _host.SleepMs(ms);
+                return new Acted(true, "等待 " + (ms / 1000.0).ToString("0.#") + " 秒");
+            }
             case "waitmode":
             {
                 // 到达某模式的“探针”原子（对应旧流程的 WaitModeReachable）：
@@ -804,23 +878,27 @@ public sealed class FlowEngine
                 int timeoutSec = a.Ms > 0 ? a.Ms : 240;
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 int presses = 0;
+                long nextPressAt = 0;
                 while (sw.Elapsed.TotalSeconds < timeoutSec)
                 {
-                    var o = ModeObserved();
+                    // 一帧只抓一次：mode 与 menuopen 共用同一份观察（靠帧序号缓存）
+                    var f = _host.Capture();
+                    var o = ModeObserved(f);
                     if (o.Value == want)
                     {
                         Ctx.Facts["mode_reached"] = "true";
                         return new Acted(true, "确认到达" + (want == "story" ? "故事" : "在线")
                             + "（用时 " + (int)sw.Elapsed.TotalSeconds + "s，按 Start " + presses + " 次）");
                     }
-                    bool open = MenuOpenObserved().Value == "true";
-                    if (!open)
+                    bool open = MenuOpenObserved(f).Value == "true";
+                    // 读屏快、按键慢：重读间隔与按 Start 的最小间隔都在参数页（6 自动化）；太小会把菜单开了又关
+                    if (!open && sw.ElapsedMilliseconds >= nextPressAt)
                     {
                         _host.Tap("Start");
                         presses++;
-                        _host.SleepMs(_settings.Automation.PressMs + 2000);
+                        nextPressAt = sw.ElapsedMilliseconds + Math.Max(0, _settings.Automation.ModeStartPressMinMs);
                     }
-                    else _host.SleepMs(1200);   // 已开但条带没出字：短等重读，不按键
+                    _host.SleepMs(Math.Max(20, open ? _settings.Automation.ModeMenuOpenSleepMs : _settings.Automation.ModeReReadMs));
                 }
                 Ctx.Facts["mode_reached"] = "false";
                 return new Acted(false, "未确认到达" + (want == "story" ? "故事" : "在线")
@@ -846,10 +924,17 @@ public sealed class FlowEngine
                     Ctx.Facts["firewall"] = "true";
                     return new Acted(true, "跳过防火墙（未启用封网）");
                 }
+                // cue→封网间隔：命中 cue 后、真正翻规则前先等一会儿（参数页可调，默认 0=立刻）
+                int waitMs = a.Enable ? Math.Clamp(_settings.Shift.CueToBlockMs, 0, 10000) : 0;
+                if (waitMs > 0) _host.SleepMs(waitMs);
                 bool ok = _host.Firewall(a.Enable);
                 // 结果记成事实，方便 Gate 用 "fact:firewall eq true" 引用
                 Ctx.Facts["firewall"] = (ok && a.Enable) ? "true" : "false";
-                return new Acted(ok, (a.Enable ? "已封网" : "已恢复联网") + (ok ? "" : " —— 失败/忽略"));
+                // 另记一条只在“封网”时写、不会被末尾“恢复联网”覆盖的事实：本轮到底封上没有（日志汇总用）
+                if (a.Enable) Ctx.Facts["blocked"] = ok ? "true" : "false";
+                return new Acted(ok, (a.Enable ? "已封网" : "已恢复联网")
+                    + (a.Enable && waitMs > 0 ? "（延迟 " + waitMs + "ms）" : "")
+                    + (ok ? "" : " —— 失败/忽略"));
             case "check":
                 return new Acted(true, "check");
             default:

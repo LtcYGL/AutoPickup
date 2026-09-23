@@ -26,7 +26,7 @@ public sealed class CloudCueDetector
 
     public void Begin()
     {
-        lock (_lock2())
+        lock (_lock)
         {
             _short.Clear();
             _longQ.Clear();
@@ -34,8 +34,6 @@ public sealed class CloudCueDetector
             _quietOk = false;
         }
     }
-
-    private object _lock2() => _lock;
 
     private readonly object _lock = new();
 

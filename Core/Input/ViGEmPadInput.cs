@@ -12,8 +12,6 @@ public sealed class ViGEmPadInput : IInputLayer
     private ushort _mask;
     private int _consecFails;
     private int _reconnects;
-    public int Failures => _consecFails;
-    public int Reconnects => _reconnects;
 
     public string Name => "ViGEm 手柄";
     public bool IsAvailable => _pad is { IsReady: true };

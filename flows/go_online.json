@@ -1,0 +1,218 @@
+{
+  "name": "go-online",
+  "description": "进入 GTA 在线模式（凭邀请的战局）：轮盘手势优先，失败回退暂停菜单。流程页模式测试与诊断用",
+  "steps": [
+    {
+      "id": "leave_menu",
+      "title": "清场（收起菜单）",
+      "action": {
+        "op": "menu",
+        "mode": "close"
+      },
+      "observe": [
+        "menuopen"
+      ],
+      "expect": [
+        "ctx:menuopen eq false"
+      ],
+      "timeoutSec": 4,
+      "retry": {
+        "max": 2,
+        "intervalMs": 1000
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "gesture_online",
+      "title": "进线上手势",
+      "action": {
+        "op": "gesture",
+        "dir": "down"
+      },
+      "observe": [
+        "dialog"
+      ],
+      "expect": [
+        "ctx:dialog eq true"
+      ],
+      "timeoutSec": 7,
+      "retry": {
+        "max": 2,
+        "intervalMs": 3000
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_online_menu",
+      "title": "回退·开菜单",
+      "require": [
+        "fact:gesture_online.ok eq false"
+      ],
+      "action": {
+        "op": "menu",
+        "mode": "open"
+      },
+      "observe": [
+        "menuopen"
+      ],
+      "expect": [
+        "ctx:menuopen eq true"
+      ],
+      "timeoutSec": 15,
+      "retry": {
+        "max": 2,
+        "intervalMs": 1500
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_online_tab",
+      "title": "回退·切在线页",
+      "require": [
+        "fact:gesture_online.ok eq false"
+      ],
+      "action": {
+        "op": "tab",
+        "target": "在线"
+      },
+      "observe": [
+        "selectedtab"
+      ],
+      "expect": [
+        "ctx:selectedtab like 在线"
+      ],
+      "retry": {
+        "max": 3,
+        "intervalMs": 800
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_online_enter",
+      "title": "回退·进入GTA在线模式",
+      "require": [
+        "fact:gesture_online.ok eq false"
+      ],
+      "action": {
+        "op": "navigate",
+        "name": "进入GTA在线模式",
+        "target": "DPadDown",
+        "times": 15
+      },
+      "observe": [
+        "focusrow"
+      ],
+      "expect": [
+        "ctx:focusrow like 进入GTA在线模式"
+      ],
+      "timeoutSec": 15,
+      "retry": {
+        "max": 3,
+        "intervalMs": 1000
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_online_pick",
+      "title": "回退·确认进入",
+      "require": [
+        "fact:gesture_online.ok eq false"
+      ],
+      "action": {
+        "op": "tap",
+        "button": "A"
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_online_invite",
+      "title": "回退·选邀请战局",
+      "require": [
+        "fact:gesture_online.ok eq false"
+      ],
+      "action": {
+        "op": "navigate",
+        "name": "凭邀请加入的战局",
+        "target": "DPadDown",
+        "times": 15
+      },
+      "observe": [
+        "focusrow"
+      ],
+      "expect": [
+        "ctx:focusrow like 凭邀请加入的战局"
+      ],
+      "timeoutSec": 15,
+      "retry": {
+        "max": 3,
+        "intervalMs": 1000
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_online_go",
+      "title": "回退·确认战局",
+      "require": [
+        "fact:gesture_online.ok eq false"
+      ],
+      "action": {
+        "op": "tap",
+        "button": "A"
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "confirm_online",
+      "title": "确认弹窗（进线上）",
+      "action": {
+        "op": "tap",
+        "button": "A"
+      },
+      "observe": [
+        "dialog"
+      ],
+      "expect": [
+        "ctx:dialog eq false"
+      ],
+      "timeoutSec": 25,
+      "retry": {
+        "max": 2,
+        "intervalMs": 2000
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "wait_online",
+      "title": "确认到达在线",
+      "action": {
+        "op": "waitmode",
+        "target": "online",
+        "ms": 300
+      },
+      "expect": [
+        "fact:mode_reached eq true"
+      ],
+      "onFail": "abort"
+    },
+    {
+      "id": "close_menu",
+      "title": "关菜单",
+      "action": {
+        "op": "menu",
+        "mode": "close"
+      },
+      "observe": [
+        "menuopen"
+      ],
+      "expect": [
+        "ctx:menuopen eq false"
+      ],
+      "timeoutSec": 4,
+      "retry": {
+        "max": 2,
+        "intervalMs": 800
+      },
+      "onFail": "continue"
+    }
+  ]
+}

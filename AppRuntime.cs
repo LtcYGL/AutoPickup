@@ -1,7 +1,6 @@
 using AutoPickup.Config;
 using AutoPickup.Core.Audio;
 using AutoPickup.Core.Capture;
-using AutoPickup.Core.Fsm;
 using AutoPickup.Core.Input;
 using AutoPickup.Core.Jobs;
 using AutoPickup.Core.Net;
@@ -12,7 +11,7 @@ using System.Security.Cryptography;
 
 namespace AutoPickup;
 
-/// <summary>组合根：装配日志/配置/能力服务。供 UI 与后续状态机/编排器共用。</summary>
+/// <summary>组合根：装配日志/配置/能力服务，并载入流程（班次 / 进线上 / 回线下）。</summary>
 public sealed class AppRuntime : IDisposable
 {
     public AppSettings Settings { get; }
@@ -28,15 +27,18 @@ public sealed class AppRuntime : IDisposable
     public ScreenReader Reader { get; }
     public FocusRowReader RowReader { get; }
     public TabReader Tab { get; }
-    public NetmodeMachine Machine { get; }
     public ShiftOrchestrator Jobs { get; }
     /// <summary>原子引擎（新流程）。</summary>
     public AutoPickup.Core.Flow.FlowEngine Atoms { get; }
-    /// <summary>班次用的原子流程（flows/shift_single.json）；缺失则为 null，班次自动回退 legacy。</summary>
+    /// <summary>班次主流程（flows/shift_single.json）。</summary>
     public AutoPickup.Core.Flow.FlowProgram? AtomsFlow { get; }
+    /// <summary>进线上流程（flows/go_online.json）：流程页模式测试/诊断用。</summary>
+    public AutoPickup.Core.Flow.FlowProgram? GoOnlineFlow { get; }
+    /// <summary>回线下流程（flows/return_story.json）：模式测试 + 失败轮/停止时的安全收尾用。</summary>
+    public AutoPickup.Core.Flow.FlowProgram? ReturnStoryFlow { get; }
 
-    /// <summary>找并载入班次原子流程（exe 旁 flows/shift_single.json，其次工作区）。</summary>
-    private static AutoPickup.Core.Flow.FlowProgram? LoadShiftFlow(LogBus log)
+    /// <summary>载入流程：优先用户数据目录（可自行修改），其次开发期工作区。</summary>
+    private static AutoPickup.Core.Flow.FlowProgram? LoadFlow(string fileName, LogBus log)
     {
         try
         {
@@ -44,23 +46,23 @@ public sealed class AppRuntime : IDisposable
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AutoPickup");
             foreach (var p in new[]
             {
-                Path.Combine(AutoPickup.Core.AssetBootstrap.FlowsDir(dataDir), "shift_single.json"),
-                Path.Combine(AppContext.BaseDirectory, "flows", "shift_single.json"),
-                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "flows", "shift_single.json"),
+                Path.Combine(AutoPickup.Core.AssetBootstrap.FlowsDir(dataDir), fileName),
+                Path.Combine(AppContext.BaseDirectory, "flows", fileName),
+                Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "flows", fileName),
             })
             {
                 string full = Path.GetFullPath(p);
                 if (File.Exists(full))
                 {
                     var f = AutoPickup.Core.Flow.FlowJson.Load(full);
-                    log.Info("原子流程已载入: " + full + "（" + f.Steps.Count + " 步，sha256 "
+                    log.Info("流程已载入: " + full + "（" + f.Steps.Count + " 步，sha256 "
                         + FlowFileHash(full) + "）", "Flow");
                     return f;
                 }
             }
-            log.Warn("未找到 flows/shift_single.json，班次将走 legacy 流程", "Flow");
+            log.Warn("未找到 flows/" + fileName, "Flow");
         }
-        catch (Exception e) { log.Error("载入原子流程失败（将走 legacy）: " + e.Message, "Flow"); }
+        catch (Exception e) { log.Error("载入流程失败 " + fileName + ": " + e.Message, "Flow"); }
         return null;
     }
 
@@ -113,17 +115,17 @@ public sealed class AppRuntime : IDisposable
         Reader = new ScreenReader(Bank, Matcher, Ocr, log, settings.Vision);
         RowReader = new FocusRowReader(Ocr, log, settings);
         Tab = new TabReader(Ocr, log, settings);
-        Machine = new NetmodeMachine(Window, Reader, RowReader, Tab, Input, settings, log);
-
         // 引导期（资源释放/更新）的提示：日志系统起来后补记一条，方便定位"流程版本不对"
         foreach (var m in AutoPickup.Core.AssetBootstrap.DrainNotices()) log.Info(m, "Assets");
 
-        // 原子引擎（新流程）：与旧 FSM 并存，参数页/流程页可一键切回 legacy
-        AtomsFlow = LoadShiftFlow(log);
+        // 原子引擎：班次、模式切换、安全收尾都跑同一套流程
+        AtomsFlow = LoadFlow("shift_single.json", log);
+        GoOnlineFlow = LoadFlow("go_online.json", log);
+        ReturnStoryFlow = LoadFlow("return_story.json", log);
         var atomsHost = new AutoPickup.Core.Flow.LiveFlowHost(Window, Input, Firewall, settings, log,
             passive: false, audio: Audio);
         Atoms = new AutoPickup.Core.Flow.FlowEngine(atomsHost, log, settings, Tab, Reader, Ocr, RowReader);
-        Jobs = new ShiftOrchestrator(Machine, Firewall, Audio, settings, log, Atoms, AtomsFlow);
+        Jobs = new ShiftOrchestrator(Firewall, settings, log, Atoms, AtomsFlow, ReturnStoryFlow);
     }
 
     /// <summary>模板目录：优先用户数据目录（内嵌资源释放处，用户可替换/新增），其次开发期工作区。</summary>

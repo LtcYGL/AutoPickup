@@ -46,6 +46,23 @@ public sealed class OverlayForm : Form
 
     public bool TunerOn => _tunerOn;
 
+    /// <summary>创建本窗口的线程（=UI 线程）。覆盖层的一切界面操作都必须回到它：
+    /// 之前 F7 走 RunOp→Task.Run，第一次 Show() 发生在线程池线程上，句柄与 400/250ms 定时器全挂到
+    /// 没有消息循环的线程 → 永远收不到 WM_PAINT → 整块客户区显示未绘制的白遮罩且不消失。</summary>
+    private readonly int _uiThread = Environment.CurrentManagedThreadId;
+
+    /// <summary>把界面操作切回 UI 线程（在 UI 线程调用时同步执行）。</summary>
+    private void Ui(Action a)
+    {
+        try
+        {
+            if (Environment.CurrentManagedThreadId == _uiThread) { a(); return; }
+            if (IsHandleCreated) BeginInvoke(a);
+            else _log.Warn("覆盖层句柄尚未建立，忽略一次界面更新（应在 UI 线程预建句柄）", "覆盖层");
+        }
+        catch (Exception e) { _log.Warn("覆盖层线程切换失败: " + e.Message, "覆盖层"); }
+    }
+
     public OverlayForm(GtaWindowSource window, AppSettings settings, LogBus log, NccMatcher? matcher = null, TemplateBank? bank = null)
     {
         _window = window;
@@ -94,10 +111,13 @@ public sealed class OverlayForm : Form
     public void SetTuner(bool on)
     {
         if (!_overlay.Enabled) on = false;
-        if (_tunerOn == on) return;
-        _tunerOn = on;
-        _log.Info(on ? "覆盖层：OCR 区域可视化 开" : "覆盖层：OCR 区域可视化 关", "覆盖层");
-        Tick();
+        Ui(() =>
+        {
+            if (_tunerOn == on) return;
+            _tunerOn = on;
+            _log.Info(on ? "覆盖层：OCR 区域可视化 开" : "覆盖层：OCR 区域可视化 关", "覆盖层");
+            Tick();
+        });
     }
 
     public void ToggleTuner() => SetTuner(!_tunerOn);
@@ -128,16 +148,22 @@ public sealed class OverlayForm : Form
     public void ShowToast(string text)
     {
         if (!_overlay.Enabled || !_overlay.ToastOnBlockSave) return;
-        _toastText = text;
-        _toastUntil = DateTime.UtcNow.AddMilliseconds(Math.Max(600, _overlay.ToastMs));
-        Tick();
+        Ui(() =>
+        {
+            _toastText = text;
+            _toastUntil = DateTime.UtcNow.AddMilliseconds(Math.Max(600, _overlay.ToastMs));
+            Tick();
+        });
     }
 
     /// <summary>班次等自动化任务期间强制隐藏（避免任何视觉/抓帧干扰）。</summary>
     public void SuspendForTask(bool hide)
     {
-        if (hide) { Visible = false; }
-        else Tick();
+        Ui(() =>
+        {
+            if (hide) { Visible = false; }
+            else Tick();
+        });
     }
 
     private void Tick()
@@ -167,7 +193,8 @@ public sealed class OverlayForm : Form
             Win32.ClientToScreen(h, ref origin);
             int w = c.Right - c.Left, ht = c.Bottom - c.Top;
             if (w < 40 || ht < 40) { if (Visible) Visible = false; return; }
-            var want = new Rectangle(origin.X, origin.Y, w, ht);
+            // 只有提示时用左上角小窗（绝不整块盖住游戏）；开了区域可视化才铺满客户区
+            var want = _tunerOn ? new Rectangle(origin.X, origin.Y, w, ht) : ToastRect(origin, w);
             if (Bounds != want) Bounds = want;
             if (!Visible) Show();
             MaybeProbe();
@@ -274,10 +301,37 @@ public sealed class OverlayForm : Form
         catch (Exception ex) { _log.Warn("覆盖层绘制异常: " + ex.Message, "覆盖层"); }
     }
 
+    /// <summary>提示小窗的位置与尺寸：贴游戏客户区左上角，尺寸=文字+内边距（不铺满客户区）。</summary>
+    private Rectangle ToastRect(Win32.POINT origin, int clientW)
+    {
+        using var f = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold);
+        var sz = TextRenderer.MeasureText(_toastText ?? "", f);
+        int tw = Math.Min(Math.Max(120, sz.Width + 26), Math.Max(120, clientW - 24));
+        int th = Math.Max(46, sz.Height + 24);
+        return new Rectangle(origin.X + 12, origin.Y + 12, tw, th);
+    }
+
     private void PaintCore(Graphics g)
     {
         int W = ClientSize.Width, H = ClientSize.Height;
-        if (W < 40 || H < 40) return;
+        if (W < 20 || H < 20) return;
+
+        // 提示模式（没开区域可视化）：窗口本身就只有提示框那么大，整块画成提示框。
+        // 不再“铺满客户区的分层窗口 + 左上角写一行字”——那种做法在窗口化翻转模型上极易把游戏弄成白/黑遮罩。
+        if (!_tunerOn)
+        {
+            if (_toastText is null) return;
+            using var tfont = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold);
+            using var tbg = new SolidBrush(Color.FromArgb(255, 18, 20, 24));
+            using var tborder = new Pen(Color.FromArgb(255, 255, 200, 60), 2);
+            var tbox = new Rectangle(0, 0, Math.Max(2, W - 1), Math.Max(2, H - 1));
+            g.FillRectangle(tbg, tbox);
+            g.DrawRectangle(tborder, tbox);
+            TextRenderer.DrawText(g, _toastText, tfont, new Rectangle(12, 0, Math.Max(2, W - 24), H),
+                Color.FromArgb(255, 255, 226, 120),
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.WordEllipsis);
+            return;
+        }
 
         if (_tunerOn && _overlay.DrawRegions)
         {

@@ -109,68 +109,6 @@ public sealed class ScreenReader
         return best;
     }
 
-    // ---------- 横幅定点缓存（快速复查，避免每次全图扫描） ----------
-    private sealed record BannerCache(int W, int H, string Group, double Scale,
-        int X, int Y, int Tw, int Th);
-    private BannerCache? _bannerCache;
-
-    public bool HasBannerCache(Frame frame)
-        => _bannerCache is not null && _bannerCache.W == frame.Width && _bannerCache.H == frame.Height;
-
-    /// <summary>在记忆框 ± 小邻域复查横幅是否仍在（约几十毫秒）。</summary>
-    public bool FastBannerPresent(Frame frame)
-    {
-        if (_bannerCache is null) return false;
-        var c = _bannerCache;
-        if (c.W != frame.Width || c.H != frame.Height) return false;
-        var gray = Imaging.BgraToGray(frame.Bgra, frame.Width, frame.Height);
-        var tplList = _bank.ByGroup(c.Group);
-        var tpl = tplList.FirstOrDefault(t => t.Name.Length > 0);
-        if (tpl is null) return false;
-        int tw = c.Tw, th = c.Th;
-        if (tw < 8 || th < 8) return false;
-        var feat = Imaging.TextEnergy(gray, frame.Width, frame.Height, 7);
-        byte[] tplGray = Imaging.GrayDownsample(tpl.Gray, tpl.Width, tpl.Height, tw, th);
-        var tdata = Imaging.TextEnergy(tplGray, tw, th, 7);
-        var (tm, ts) = Imaging.Stats(tdata, 0, tw * th);
-        if ((double)ts < 1e-3) return false;
-        double best = -2;
-        int x0 = Math.Max(0, c.X - 4), x1 = Math.Min(frame.Width - tw, c.X + 4);
-        int y0 = Math.Max(0, c.Y - 2), y1 = Math.Min(frame.Height - th, c.Y + 2);
-        for (int y = y0; y <= y1; y++)
-        {
-            int rowOff = y * frame.Width;
-            for (int x = x0; x <= x1; x++)
-            {
-                double sc = ScoreWindowLocal(feat, frame.Width, rowOff, x, tw, th, tdata, tm, ts);
-                if (sc > best) best = sc;
-            }
-        }
-        return best >= 0.78;
-    }
-
-    private static double ScoreWindowLocal(float[] src, int stride, int rowOff, int x,
-        int tw, int th, float[] tdata, double tmean, double tstd)
-    {
-        int n = tw * th;
-        double sum = 0, sum2 = 0, dot = 0;
-        int ti = 0;
-        for (int yy = 0; yy < th; yy++)
-        {
-            int baseOff = rowOff + yy * stride + x;
-            for (int xx = 0; xx < tw; xx++)
-            {
-                double v = src[baseOff + xx];
-                sum += v; sum2 += v * v; dot += v * tdata[ti++];
-            }
-        }
-        double meanW = sum / n;
-        double varW = sum2 / n - meanW * meanW;
-        double stdW = Math.Sqrt(Math.Max(0.0, varW));
-        if (stdW < 1e-3) return -2;
-        return (dot / n - meanW * tmean) / (stdW * tstd);
-    }
-
     /// <summary>横幅 OCR 复核：裁画面上部搜索带（整宽），按工作像素预算识别一次，返回去空白文本。</summary>
     private string? ReadBannerByOcr(Frame frame, byte[] gray, double ratio)
     {
@@ -261,20 +199,6 @@ public sealed class ScreenReader
             _log.Info(string.Format("横幅模板匹配 上部{0:F0}% 耗时 {1}ms（故事 {2:F3} / 在线 {3:F3}）",
                 bannerRatio * 100, bannerSw.ElapsedMilliseconds, res.StoryScore, res.OnlineScore), "Ocr");
 
-        // 记录强横幅位置，供后续定点复查
-        var strong = res.StoryBest is { Score: >= 0.75 } ? res.StoryBest
-                   : res.OnlineBest is { Score: >= 0.75 } ? res.OnlineBest : null;
-        if (strong is not null)
-        {
-            _bannerCache = new BannerCache(frame.Width, frame.Height,
-                strong.Group, strong.Scale, strong.X1, strong.Y1, strong.Width, strong.Height);
-        }
-        else if (Math.Max(res.StoryScore, res.OnlineScore) < 0.60)
-        {
-            // 全图扫描确实看不到横幅（世界/加载/已关菜单）→ 清除陈旧缓存，避免误导定点复查
-            _bannerCache = null;
-        }
-
         double s = res.StoryScore;
         double o = res.OnlineScore;
         double h = res.HomeScore;
@@ -318,7 +242,7 @@ public sealed class ScreenReader
                 res.OcrInputRect = (0, 0, frame.Width, frame.Height);
                 if (PreviewWords)
                 {
-                    var rawWords = _ocr.RecognizeWords(BgraFromGray(fullPrep.Gray), fullPrep.Width, fullPrep.Height);
+                    var rawWords = _ocr.RecognizeWords(Imaging.GrayToBgra(fullPrep.Gray), fullPrep.Width, fullPrep.Height);
                     var mapped = new List<OcrWord>(rawWords.Count);
                     foreach (var wd in rawWords)
                         mapped.Add(new OcrWord(wd.Text,
@@ -492,17 +416,6 @@ public sealed class ScreenReader
         var text = OcrPrep.Recognize(_ocr, v, _log, site + "·诊断", crop, cw, ch, prep);
         return (text, string.Format("{0} {1}x{2}→{3}x{4} k={5:F2}",
             site, cw, ch, prep.Width, prep.Height, prep.Resized ? prep.Scale : 1.0));
-    }
-
-    private static byte[] BgraFromGray(byte[] gray)
-    {
-        var bgra = new byte[gray.Length * 4];
-        for (int i = 0, j = 0; i < gray.Length; i++, j += 4)
-        {
-            byte v = gray[i];
-            bgra[j] = v; bgra[j + 1] = v; bgra[j + 2] = v; bgra[j + 3] = 255;
-        }
-        return bgra;
     }
 
     /// <summary>按原帧像素取一块灰度（x0/y0/x1/y1 为闭开区间）。</summary>

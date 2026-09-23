@@ -7,6 +7,11 @@ public sealed class Frame
     public int Height { get; }
     public byte[] Bgra { get; }
 
+    /// <summary>本次抓帧的序号（同一帧=同一序号，每次新抓帧递增）。观察缓存用它当钥匙：
+    /// 以前缓存按 <c>Bgra</c> 数组引用判等，而每次抓帧都是新数组 → 缓存永远不命中、同一帧被反复 OCR。
+    /// 0 = 未标记（不缓存）。</summary>
+    public long Seq { get; set; }
+
     public Frame(int width, int height, byte[] bgra)
     {
         Width = width;

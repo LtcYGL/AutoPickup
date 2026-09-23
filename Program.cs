@@ -150,11 +150,10 @@ internal static class Program
             try
             {
                 int n = int.TryParse(args[1], out var v) ? v : 1;
-                bool stay = Array.IndexOf(args, "--stay-online") >= 0;
                 using var rtj = AppRuntime.CreateDefault();
                 NativeConsole.Ln("shift start: " + n + " 轮");
                 using var mirror = MirrorLog(rtj);
-                bool ok = rtj.Jobs.RunShifts(n, stay);
+                bool ok = rtj.Jobs.RunShifts(n);
                 NativeConsole.Ln("shift => " + (ok ? "OK" : "FAIL"));
             }
             catch (Exception ex) { Console.WriteLine("shift error: " + ex.Message); }
@@ -228,55 +227,6 @@ internal static class Program
                 NativeConsole.Ln("采帧结束，共 " + n + " 张");
             }
             catch (Exception ex) { Console.WriteLine("record error: " + ex.Message); }
-            return;
-        }
-        if (args.Contains("--draft-selftest"))
-        {
-            // 往返自检：读流程 JSON → 草稿 → 另存 → 再读回 → 比对结构与步数
-            try
-            {
-                string src = args.Length >= 2 ? args[1] : "flows/online2story.json";
-                using var rtx = AppRuntime.CreateDefault();
-                var d = AutoPickup.Core.Flow.FlowDraft.Load(src);
-                string outPath = Path.Combine(rtx.DataDir, "diag", "draft_roundtrip.json");
-                d.Save(outPath);
-                var d2 = AutoPickup.Core.Flow.FlowDraft.Load(outPath);
-                var prog1 = d.Compile();
-                var prog2 = d2.Compile();
-                var sb = new System.Text.StringBuilder();
-                sb.AppendLine("草稿往返自检: " + src);
-                sb.AppendLine("  步数 " + d.Steps.Count + " → 另存 → " + d2.Steps.Count);
-                sb.AppendLine("  名称 " + d.Name + " → " + d2.Name);
-                bool same = d.Steps.Count == d2.Steps.Count
-                    && d.Steps.Select((s, i) => s.AtomId == d2.Steps[i].AtomId).All(x => x);
-
-                // 编辑器逻辑自检（无界面）：建流程 → 加原子 → 移动 → 存 → 读回 → 编译
-                var ed = new AutoPickup.Core.Flow.FlowDraft { Name = "editor-selftest" };
-                var a1 = ed.Add(AutoPickup.Core.Flow.AtomCatalog.Get("obs.mode")!);
-                var a2 = ed.Add(AutoPickup.Core.Flow.AtomCatalog.Get("act.gesture")!);
-                a2.Args["dir"] = "down";
-                var a3 = ed.Add(AutoPickup.Core.Flow.AtomCatalog.Get("gate.ctx")!);
-                int before = ed.Steps.Count;
-                ed.Move(ed.Steps[2], -1);
-                string order = string.Join(",", ed.Steps.Select(x => x.AtomId));
-                string edPath = Path.Combine(rtx.DataDir, "diag", "editor_selftest.json");
-                ed.Save(edPath);
-                var ed2 = AutoPickup.Core.Flow.FlowDraft.Load(edPath);
-                var edProg = ed2.Compile();
-                sb.AppendLine("编辑器自检: 加 3 个原子=" + (before == 3) + "  移动后顺序=" + order
-                    + "  读回步数=" + ed2.Steps.Count + "  编译步数=" + edProg.Steps.Count
-                    + "  手势方向=" + (ed2.Steps.FirstOrDefault(x => x.AtomId == "act.gesture")?.Args.GetValueOrDefault("dir") ?? "?"));
-                sb.AppendLine("编辑器自检文件: " + edPath);
-                sb.AppendLine("  原子序列一致: " + same);
-                sb.AppendLine("  编译后步骤数 " + prog1.Steps.Count + " vs " + prog2.Steps.Count);
-                foreach (var (s, i) in d2.Steps.Select((s, i) => (s, i)))
-                    sb.AppendLine($"    [{i}] {s.AtomId} id={s.Id} expect=[{string.Join(", ", s.Expect)}] retry={s.RetryMax}x{s.RetryIntervalMs} timeout={s.TimeoutSec} onFail={s.OnFail}");
-                string outp = Path.Combine(rtx.DataDir, "diag", "draft_selftest.txt");
-                try { File.WriteAllText(outp, sb.ToString(), new System.Text.UTF8Encoding(false)); } catch { }
-                Console.WriteLine(sb.ToString());
-                Console.WriteLine("=> " + outp + " / " + outPath);
-            }
-            catch (Exception ex) { Console.WriteLine("draft-selftest error: " + ex); }
             return;
         }
         if (args.Contains("--obs-check"))
@@ -396,12 +346,6 @@ internal static class Program
             catch (Exception ex) { Console.WriteLine("flow error: " + ex.Message); }
             return;
         }
-        if (args.Length >= 2 && args[0] == "--navlist")
-        {
-            try { RunNavList(args[1]); }
-            catch (Exception ex) { Console.WriteLine("navlist error: " + ex.Message); }
-            return;
-        }
         if (args.Length >= 2 && args[0] == "--row")
         {
             try { RunRow(args[1]); }
@@ -514,37 +458,6 @@ internal static class Program
             catch (Exception ex) { Console.WriteLine("settings-dump error: " + ex.Message); }
             return;
         }
-        if (args.Length >= 2 && args[0] == "--gesture")
-        {
-            try
-            {
-                using var rtg = AppRuntime.CreateDefault();
-                using var mirror = MirrorLog(rtg);
-                int waitSec = 0;
-                for (int i = 2; i < args.Length; i++)
-                    if (args[i] == "--wait" && i + 1 < args.Length) int.TryParse(args[i + 1], out waitSec);
-                bool okg = rtg.Machine.TryQuickGestureStandalone(args[1], waitSec);
-                NativeConsole.Ln("gesture => " + (okg ? "OK(出现确认弹窗)" : "FAIL(未见确认弹窗)"));
-            }
-            catch (Exception ex) { Console.WriteLine("gesture error: " + ex.Message); }
-            return;
-        }
-        if (args.Contains("--probe"))
-        {
-            try
-            {
-                using var rtp = AppRuntime.CreateDefault();
-                bool okp = rtp.Machine.Probe(cycles: 2);
-                Console.WriteLine("probe result: " + (okp ? "OK" : "FAIL"));
-            }
-            catch (Exception ex)
-            {
-                try { using var rtx = AppRuntime.CreateDefault(); rtx.Log.Error("probe FATAL: " + ex); }
-                catch { }
-            }
-            return;
-        }
-
         bool createdNew;
         using var mutex = new Mutex(true, "AutoPickup_Single_Local", out createdNew);
         if (!createdNew)
@@ -844,7 +757,7 @@ internal static class Program
         sb.AppendLine("横幅带 OCR（上部 " + v.BannerSearchPercent + "% = " + bandH + "px，送OCR " + prep.Width + "x" + prep.Height + "）：");
         sb.AppendLine("  " + (txt ?? "(无文本)"));
         // 词框（原帧坐标）：用来精确确定横幅模板该裁哪里
-        var words = rt.Ocr.RecognizeWords(BgraFromGrayLocal(prep.Gray), prep.Width, prep.Height);
+        var words = rt.Ocr.RecognizeWords(Imaging.GrayToBgra(prep.Gray), prep.Width, prep.Height);
         if (words.Count > 0)
         {
             double inv = prep.Resized ? 1.0 / prep.Scale : 1.0;
@@ -863,15 +776,6 @@ internal static class Program
         try { File.WriteAllText(outPath, sb.ToString(), new System.Text.UTF8Encoding(false)); } catch { }
         Console.WriteLine(sb.ToString());
         Console.WriteLine("=> " + outPath);
-    }
-
-    /// <summary>灰度→BGRA（本地小工具，避免依赖测试命名空间）。</summary>
-    private static byte[] BgraFromGrayLocal(byte[] gray)
-    {
-        var b = new byte[gray.Length * 4];
-        for (int i = 0, j = 0; i < gray.Length; i++, j += 4)
-        { byte v = gray[i]; b[j] = v; b[j + 1] = v; b[j + 2] = v; b[j + 3] = 255; }
-        return b;
     }
 
     /// <summary>性能剖析：对一张图跑 Read（含横幅模板+NCC+OCR），打印每阶段与每条模板的耗时。
@@ -1303,29 +1207,22 @@ internal static class Program
         Console.WriteLine("=> " + outPath);
     }
 
-    /// <summary>完整流程：--flow story（在线→故事）或 --flow online（故事→在线邀请战局）。</summary>
+    /// <summary>模式切换：--flow story（在线→故事）或 --flow online（故事→在线邀请战局）。跑的是与班次同一套原子流程。</summary>
     private static void RunFlow(string which)
     {
         using var rt = AppRuntime.CreateDefault();
         using var mirror = MirrorLog(rt);
         NativeConsole.Ln("flow start: " + which);
-        bool ok = which switch
+        var flow = which switch
         {
-            "story" => rt.Machine.EnsureStory(),
-            "online" => rt.Machine.EnsureOnlineInvite(),
-            _ => false,
+            "story" => rt.ReturnStoryFlow,
+            "online" => rt.GoOnlineFlow,
+            _ => null,
         };
+        if (flow is null) { NativeConsole.Ln("flow " + which + " => 未知目标（story|online）或流程缺失"); return; }
+        rt.Atoms.ResetContext();
+        bool ok = rt.Atoms.Run(flow);
         NativeConsole.Ln("flow " + which + " => " + (ok ? "OK" : "FAIL"));
-    }
-
-    /// <summary>列表内逐键导航自测：--navlist &lt;目标条目&gt;（游戏需已暂停且在 在线 tab 列表）。</summary>
-    private static void RunNavList(string target)
-    {
-        using var rt = AppRuntime.CreateDefault();
-        using var mirror = MirrorLog(rt);
-        NativeConsole.Ln("导航目标: " + target + "（在 在线 列表内逐键闭环）");
-        var last = rt.Machine.NavigateToListTarget(MenuRegistry.OnlineMainItems, target);
-        NativeConsole.Ln("结果: " + (last ?? "null"));
     }
 
     /// <summary>批量识别：结果写数据目录 batch_result.tsv（逐行落盘，单文件失败不影响继续）。</summary>
@@ -1379,42 +1276,6 @@ internal static class Program
         }
         rt.Log.Info("batch done: " + outPath, "Batch");
         Console.WriteLine("完成: " + outPath);
-    }
-
-    /// <summary>ASCII 亮度图：把截图降采样成字符画打印，用于离线标定菜单几何。</summary>
-    private static void RunView(string imagePath)
-    {
-        using var rt = AppRuntime.CreateDefault();
-        var frame = ImagingIo.LoadImage(imagePath);
-        if (frame is null) { Console.WriteLine("无法读取: " + imagePath); return; }
-        int cell = 12;
-        int cols = frame.Width / cell, rows = frame.Height / cell;
-        string ramp = " .:-=+*#%@";
-        var sb = new System.Text.StringBuilder();
-        for (int cy = 0; cy < rows; cy++)
-        {
-            for (int cx = 0; cx < cols; cx++)
-            {
-                long lum = 0; int n = 0;
-                int y0 = cy * cell, x0 = cx * cell;
-                for (int y = y0; y < y0 + cell && y < frame.Height; y++)
-                {
-                    int o = (y * frame.Width + x0) * 4;
-                    for (int x = x0; x < x0 + cell && x < frame.Width; x++, o += 4)
-                    {
-                        int bb = frame.Bgra[o], gg = frame.Bgra[o + 1], rr = frame.Bgra[o + 2];
-                        lum += (rr * 77 + gg * 150 + bb * 29) >> 8;
-                        n++;
-                    }
-                }
-                int idx = n == 0 ? 0 : (int)((lum / n) * (ramp.Length - 1) / 255.0);
-                sb.Append(ramp[idx]);
-            }
-            sb.AppendLine("|" + (cy * cell).ToString().PadLeft(4));
-        }
-        string outPath = Path.Combine(Path.GetTempPath(), "apview_" + Path.GetFileNameWithoutExtension(imagePath) + ".txt");
-        System.IO.File.WriteAllText(outPath, sb.ToString(), new System.Text.UTF8Encoding(false));
-        Console.WriteLine("ok: " + outPath);
     }
 
 }

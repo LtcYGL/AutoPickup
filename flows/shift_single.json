@@ -9,6 +9,7 @@
       "action": { "op": "menu", "mode": "close" },
       "observe": ["menuopen"],
       "expect": [ "ctx:menuopen eq false" ],
+      "timeoutSec": 4,
       "retry": { "max": 2, "intervalMs": 1000 },
       "onFail": "continue"
     },
@@ -20,7 +21,7 @@
       "action": { "op": "gesture", "dir": "down" },
       "observe": ["dialog"],
       "expect": [ "ctx:dialog eq true" ],
-      "timeoutSec": 25,
+      "timeoutSec": 7,
       "retry": { "max": 2, "intervalMs": 3000 },
       "onFail": "continue"
     },
@@ -108,7 +109,7 @@
     {
       "id": "block_cloud",
       "title": "封网（阻断云存档）",
-      "note": "cue 命中即刻封网；超时也补封（与旧流程 fallback 一致）",
+      "note": "cue 命中后按参数页「封网延迟(cue→封网)」等待再封（默认 0=即刻）；cue 超时也补封",
       "action": { "op": "firewall", "enable": true },
       "expect": [ "fact:firewall eq true" ],
       "retry": { "max": 2, "intervalMs": 1000 },
@@ -128,19 +129,29 @@
       "action": { "op": "menu", "mode": "close" },
       "observe": ["menuopen"],
       "expect": [ "ctx:menuopen eq false" ],
+      "timeoutSec": 4,
       "retry": { "max": 2, "intervalMs": 800 },
       "onFail": "continue"
     },
     {
-      "id": "wait_savefail",
-      "title": "等“保存失败”提示",
-      "note": "验证云存档确实被阻断：左下角出现“保存失败”提示",
+      "id": "wait_hint",
+      "title": "等到货/保存失败提示",
+      "note": "左下角读到任一即算过：到货“已获取”或云存档被阻断的“保存失败”；两个都读不到才判本轮失败",
       "action": { "op": "sleep", "ms": 1500 },
       "observe": ["toast"],
-      "expect": [ "ctx:toast eq savefail" ],
+      "expect": [ "ctx:toast in savefail|cargo" ],
       "timeoutSec": 60,
+      "timeoutSetting": "SaveFailWaitSec",
       "retry": { "max": 2, "intervalMs": 2000 },
       "onFail": "abort"
+    },
+
+    {
+      "id": "settle_hint",
+      "title": "等信息到齐（提示后等待）",
+      "note": "读到提示后再硬等参数页「提示后等待(s)」秒：论坛经验——几个仓库的到货信息通常要 6~7 秒才全部弹出，等齐了再切线下。默认 0=不等",
+      "action": { "op": "sleep", "setting": "AfterHintWaitSec" },
+      "onFail": "continue"
     },
 
     {
@@ -150,7 +161,7 @@
       "action": { "op": "gesture", "dir": "up" },
       "observe": ["dialog"],
       "expect": [ "ctx:dialog eq true" ],
-      "timeoutSec": 25,
+      "timeoutSec": 7,
       "retry": { "max": 2, "intervalMs": 3000 },
       "onFail": "continue"
     },
@@ -222,6 +233,7 @@
       "action": { "op": "menu", "mode": "close" },
       "observe": ["menuopen"],
       "expect": [ "ctx:menuopen eq false" ],
+      "timeoutSec": 4,
       "retry": { "max": 2, "intervalMs": 800 },
       "onFail": "continue"
     },
@@ -237,14 +249,9 @@
     {
       "id": "cleanup_menu",
       "title": "收尾·关菜单",
+      "note": "收尾只关菜单；恢复联网交给编排器的安全收尾——那里会先回线下再解封（在线时解封会让没存上的存档被补传）",
       "require": [ "ctx:menuopen eq true" ],
       "action": { "op": "menu", "mode": "close" }
-    },
-    {
-      "id": "cleanup_net",
-      "title": "收尾·恢复联网",
-      "note": "无论如何都要恢复联网，绝不把用户留在封网状态",
-      "action": { "op": "firewall", "enable": false }
     }
   ]
 }

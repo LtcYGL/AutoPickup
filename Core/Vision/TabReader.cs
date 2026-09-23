@@ -7,11 +7,9 @@ using AutoPickup.Logging;
 namespace AutoPickup.Core.Vision;
 
 /// <summary>顶部标签条读取：选中 tab = 纯白底块（黑字），未选中 = 深底灰字。</summary>
-public sealed record TabRead(string? Selected, int WhiteX0, int WhiteX1, string StripWords, int BandY0, int BandY1)
-{
-    public int WhiteCenter => (WhiteX0 + WhiteX1) / 2;
-    public int BandYBottom => BandY1;
-}
+/// <summary>Words = Read 已经付出的那次整帧 OCR 的词框（原帧坐标），供模式判定复用，避免同一帧再跑一遍整帧 OCR。</summary>
+public sealed record TabRead(string? Selected, int WhiteX0, int WhiteX1, string StripWords, int BandY0, int BandY1,
+    IReadOnlyList<OcrWord> Words);
 
 public sealed class TabReader
 {
@@ -70,7 +68,7 @@ public sealed class TabReader
         var v0 = _settings.Vision;
         var fullGray = Imaging.BgraToGray(frame.Bgra, frame.Width, frame.Height);
         var fullPrep = OcrPrep.ForFullFrame(fullGray, frame.Width, frame.Height, v0);
-        var raw = _ocr.RecognizeWords(BgraFromGray(fullPrep.Gray), fullPrep.Width, fullPrep.Height);
+        var raw = _ocr.RecognizeWords(Imaging.GrayToBgra(fullPrep.Gray), fullPrep.Width, fullPrep.Height);
         if (v0.OcrLogInput)
             _log.Info(string.Format("OCR[tab整帧] 输入 {0} 缩放 {1:F2} 词数 {2}",
                 fullPrep.SizeNote, fullPrep.Resized ? fullPrep.Scale : 1.0, raw.Count), "Ocr");
@@ -224,7 +222,7 @@ public sealed class TabReader
         if (assembled is not null && (bestB < 150 || bestScore2 <= 60 * k)) selected = assembled;
 
         return new TabRead(string.IsNullOrEmpty(selected) ? null : selected,
-            bestX0, bestX0 + bestLen, strip, ty0, ty1);
+            bestX0, bestX0 + bestLen, strip, ty0, ty1, words);
     }
 
     private static double EdgeBrightness(byte[] gray, int w, int h, OcrWord wd)
@@ -248,14 +246,6 @@ public sealed class TabReader
         return n == 0 ? 0 : (double)sum / n;
     }
 
-    private int CountWhiteCol(byte[] gray, int w, int h, int x, int ya, int yb, int th)
-    {
-        int n = 0;
-        for (int y = Math.Max(0, ya); y <= Math.Min(h - 1, yb); y++)
-            if (gray[y * w + x] >= th) n++;
-        return n;
-    }
-
     /// <summary>tab 条带识别：按“目标字高”等比缩放到工作像素后灰度直送 OCR，
     /// 词框坐标再按同一系数还原回原帧（EdgeBrightness 等按原帧取样）。</summary>
     private IReadOnlyList<OcrWord> OcrStrip(Frame frame, int y0, int y1)
@@ -272,7 +262,7 @@ public sealed class TabReader
         var v = _settings.Vision;
         // 站点固定倍率（tab 条实测原生 1x 最佳）
         var prep = OcrPrep.ForRegionSite(crop, w, h, "tab", v);
-        var words = _ocr.RecognizeWords(BgraFromGray(prep.Gray), prep.Width, prep.Height);
+        var words = _ocr.RecognizeWords(Imaging.GrayToBgra(prep.Gray), prep.Width, prep.Height);
         if (v.OcrLogInput)
             _log.Info(string.Format("OCR[tab条] 裁剪 {0}x{1} → {2} k={3:F2} 词数 {4}",
                 w, h, prep.SizeNote, prep.Resized ? prep.Scale : 1.0, words.Count), "Ocr");
@@ -287,14 +277,4 @@ public sealed class TabReader
         return res;
     }
 
-    private static byte[] BgraFromGray(byte[] gray)
-    {
-        var bgra = new byte[gray.Length * 4];
-        for (int i = 0, j = 0; i < gray.Length; i++, j += 4)
-        {
-            byte v = gray[i];
-            bgra[j] = v; bgra[j + 1] = v; bgra[j + 2] = v; bgra[j + 3] = 255;
-        }
-        return bgra;
-    }
 }

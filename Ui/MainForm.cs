@@ -51,11 +51,7 @@ public sealed class MainForm : Form
     private Button _btnStopShift = null!;
     private NumericUpDown _rounds = null!;
     private NumericUpDown _waitMin = null!;
-    private CheckBox _stayOnline = null!;
     private CheckBox _useFw = null!;
-    private CheckBox _quickEntry = null!;
-    private CheckBox _quickReturn = null!;
-    private CheckBox _bgMode = null!;
     private Label _shiftStatus = null!;
     private Label _blockLabel = null!;
     private OverlayForm? _overlay;
@@ -164,11 +160,21 @@ public sealed class MainForm : Form
     /// <summary>创建游戏窗口覆盖层（懒加载；纯外部窗口，不注入/不抢焦点）。</summary>
     private OverlayForm? EnsureOverlay()
     {
+        // 兜底：万一在后台线程被调用（RunOp 路径），也必须回到 UI 线程再建窗口，
+        // 否则句柄会落到没有消息循环的线程上（=整块白遮罩那个坑）。本次先不显示，下次生效。
+        if (_overlay is null && InvokeRequired)
+        {
+            try { BeginInvoke(new Action(() => EnsureOverlay())); } catch { }
+            return null;
+        }
         if (_overlay is null && _rt.Settings.Overlay.Enabled)
         {
             try
             {
                 _overlay = new OverlayForm(_rt.Window, _rt.Settings, _rt.Log, _rt.Matcher, _rt.Bank);
+                // **必须在这里（UI 线程）把句柄建出来**：否则按 F7 时 RunOp 走线程池线程，
+                // 首次 Show() 会把窗口+定时器建到没有消息循环的线程上 → 整块白遮罩且不消失。
+                var _ = _overlay.Handle;
             }
             catch (Exception e) { _rt.Log.Warn("覆盖层创建失败: " + e.Message, "覆盖层"); }
         }
@@ -352,7 +358,7 @@ public sealed class MainForm : Form
 
     private Control BuildSelfCheck()
     {
-        string[] names = { "游戏进程", "游戏窗口", "抓帧", "输入层", "音频cue", "防火墙", "封存档", "OCR引擎", "模板库", "快捷切换" };
+        string[] names = { "游戏进程", "游戏窗口", "抓帧", "输入层", "音频cue", "防火墙", "封存档", "OCR引擎", "模板库" };
         // 两排状态灯：每排 5 个（6 列 = 点/名/详情 × 2）
         const int perRow = 5;
         var lt = new TableLayoutPanel
@@ -383,8 +389,7 @@ public sealed class MainForm : Form
         var fa = new FlowLayoutPanel { BackColor = C_Panel, Margin = new Padding(2, 2, 2, 2) };
         fa.Controls.AddRange(new Control[]
         {
-            ActionButton("状态机探测", () => RunOp("状态机探测", RunProbe)),
-            // 单独的手势测试按钮已移除：与“状态机探测”的手势段落冗余（探测里已含手势自检）
+            // 状态机探测/手势测试已移除：只读诊断用命令行 --obs-check / --tab-live（含证据与原始文本）
             ActionButton("使用向导", () => { using var w = new WizardForm(_rt); w.ShowDialog(this); }),
             _btnOverlay = ActionButton("显示OCR区域(F6)", ToggleOverlayTuner),
             // 默认不存样本：避免数据目录随使用无限增长（需要排查时再勾上）
@@ -558,9 +563,6 @@ public sealed class MainForm : Form
         }
     }
 
-    /// <summary>诊断用：进入参数页并返回 PropertyGrid 实例（供 CLI 自检使用）。</summary>
-    public PropertyGrid? ParamsGrid => _grid;
-
     private void SaveParams()
     {
         if (_busy) { _rt.Log.Warn("任务运行中，稍后再保存", "UI"); return; }
@@ -618,52 +620,18 @@ public sealed class MainForm : Form
             ActionButton("进入线上（摇杆↓优先）", () => RunOp("进入线上", GoOnline)),
             ActionButton("回到故事（摇杆↑优先）", () => RunOp("回到故事", GoStory)),
         });
-        var f2 = new FlowLayoutPanel { BackColor = C_Panel, Margin = new Padding(2, 2, 2, 2) };
-        _quickEntry = new CheckBox { Text = "进线上·先摇杆", AutoSize = true, Checked = _rt.Settings.QuickSwitch.EnableOnlineEntry, Margin = new Padding(4, 8, 10, 0) };
-        _quickReturn = new CheckBox { Text = "回故事·先摇杆", AutoSize = true, Checked = _rt.Settings.QuickSwitch.EnableStoryReturn, Margin = new Padding(0, 8, 0, 0) };
-        _quickEntry.CheckedChanged += (_, _) => _rt.Settings.QuickSwitch.EnableOnlineEntry = _quickEntry.Checked;
-        _quickReturn.CheckedChanged += (_, _) => _rt.Settings.QuickSwitch.EnableStoryReturn = _quickReturn.Checked;
-        _bgMode = new CheckBox { Text = "后台模式（假激活，不抢前台）", AutoSize = true, Checked = _rt.Settings.Automation.BackgroundFakeActivate, Margin = new Padding(20, 8, 0, 0) };
-        _bgMode.CheckedChanged += (_, _) => _rt.Settings.Automation.BackgroundFakeActivate = _bgMode.Checked;
-        f2.Controls.Add(new Label { Text = "快捷切换开关（即时生效，存盘在[参数]页）", AutoSize = true, Margin = new Padding(4, 12, 8, 0), ForeColor = C_Muted });
-        f2.Controls.Add(_quickEntry);
-        f2.Controls.Add(_quickReturn);
-        f2.Controls.Add(_bgMode);
-        var gMode = StackGroup("模式切换 — 摇杆优先（失败自动回退暂停菜单）", fm, f2,
-            Tip("说明：摇杆上=回故事（线下）、摇杆下=进线上；弹确认框后自动按 A；手势失败会自动改走暂停菜单流程（与旧流程一致）。\r\n后台模式：勾选后每次动作前不抢前台，改为假激活（窗口需可见，最小化无效）；其余流程完全不变。"));
-        _actionControls.Add(_quickEntry);
-        _actionControls.Add(_quickReturn);
-        _actionControls.Add(_bgMode);
-
-        // 班次引擎选择：默认原子引擎；取消勾选=一键回退旧流程（出问题时的退路）
-        var chkAtoms = new CheckBox
-        {
-            Text = "用原子引擎（取消=回退旧流程）",
-            AutoSize = true,
-            Checked = _rt.Settings.Shift.Engine.Equals("atoms", StringComparison.OrdinalIgnoreCase),
-            Margin = new Padding(0, 6, 4, 0),
-        };
-        chkAtoms.CheckedChanged += (_, _) =>
-        {
-            _rt.Settings.Shift.Engine = chkAtoms.Checked ? "atoms" : "legacy";
-            _rt.Log.Okay("班次引擎 = " + _rt.Settings.Shift.Engine
-                + (_rt.Jobs.UsingAtoms ? "（下一轮起用原子引擎）" : "（下一轮起走旧流程）"), "UI");
-            try { _rt.Store.Save(_rt.Settings); } catch { }
-        };
-        _actionControls.Add(chkAtoms);
+        var gMode = StackGroup("模式切换 — 摇杆优先（失败自动回退暂停菜单）", fm,
+            Tip("说明：摇杆上=回故事（线下）、摇杆下=进线上；弹确认框后自动按 A；手势被游戏忽略时自动改走暂停菜单（与班次同一套原子流程）。"));
 
         var r1 = new FlowLayoutPanel { BackColor = C_Panel, Margin = new Padding(2, 2, 2, 2) };
         _rounds = MkNum(1, 500, _rt.Settings.Shift.Count);
         _waitMin = MkNum(0, 480, _rt.Settings.Shift.WaitStartMins);
-        _stayOnline = new CheckBox { Text = "末轮留在线", AutoSize = true, Checked = false, Margin = new Padding(0, 6, 4, 0) };
         _useFw = new CheckBox { Text = "封网(阻断云存档)", AutoSize = true, Checked = _rt.Settings.Shift.UseFirewall, Margin = new Padding(0, 6, 0, 0) };
         r1.Controls.Add(new Label { Text = "轮数:", AutoSize = true, Margin = new Padding(0, 8, 4, 0) });
         r1.Controls.Add(_rounds);
         r1.Controls.Add(new Label { Text = "启动前等待(分钟):", AutoSize = true, Margin = new Padding(14, 8, 4, 0) });
         r1.Controls.Add(_waitMin);
-        r1.Controls.Add(_stayOnline);
         r1.Controls.Add(_useFw);
-        r1.Controls.Add(chkAtoms);
         var r2 = new FlowLayoutPanel { BackColor = C_Panel, Margin = new Padding(2, 2, 2, 2) };
         _btnStartShift = ActionButton("开始班次", StartShift);
         _btnStopShift = Btn("停止（轮次间生效）", StopShift);
@@ -682,15 +650,22 @@ public sealed class MainForm : Form
     private void GoOnline()
     {
         if (_overlay?.PreviewActive == true) CaptureEvidence("进入线上前·识别", withOcr: false);
-        bool ok = _rt.Machine.EnsureOnlineInvite(timeoutSec: 300);
-        _rt.Log.Hint("进入线上 => " + (ok ? "OK" : "FAIL（已含暂停菜单备份尝试）"), "UI");
+        RunFlow(_rt.GoOnlineFlow, "进入线上");
     }
 
     private void GoStory()
     {
         if (_overlay?.PreviewActive == true) CaptureEvidence("回到故事前·识别", withOcr: false);
-        bool ok = _rt.Machine.EnsureStory(timeoutSec: 180);
-        _rt.Log.Hint("回到故事 => " + (ok ? "OK" : "FAIL"), "UI");
+        RunFlow(_rt.ReturnStoryFlow, "回到故事");
+    }
+
+    /// <summary>跑一条模式切换流程：与班次同一套原子引擎（动作自验、证据进日志）。</summary>
+    private void RunFlow(AutoPickup.Core.Flow.FlowProgram? flow, string name)
+    {
+        if (flow is null) { _rt.Log.Error(name + "：流程缺失（flows/*.json）", "UI"); return; }
+        _rt.Atoms.ResetContext();
+        bool ok = _rt.Atoms.Run(flow);
+        _rt.Log.Hint(name + " => " + (ok ? "OK" : "未完成（看上面日志）"), "UI");
     }
 
     /// <summary>抓一帧 → 识别（可选OCR）→ 覆盖层实时预览“送进 OCR 的是什么/识别到什么” → 可选落盘样本。</summary>
@@ -716,55 +691,6 @@ public sealed class MainForm : Form
         return res;
     }
 
-    private void RunProbe()
-    {
-        var sb = new List<string>();
-        _rt.Log.Hint("======== 状态机探测（只读，不真切换）========", "探测");
-        var snap = _rt.Window.CaptureClient();
-        if (!snap.IsValid) { _rt.Log.Warn("抓帧失败，探测中止", "探测"); return; }
-        _rt.Reader.PreviewWords = _overlay?.WantWords == true;
-        var probeSw = System.Diagnostics.Stopwatch.StartNew();
-        var res = _rt.Reader.Read(snap, withOcr: true);
-        long probeMs = probeSw.ElapsedMilliseconds;
-        _overlay?.PushEvidence(snap.Width, snap.Height, res.OcrWords,
-            res.OcrText ?? "(无OCR文本)", "探测·识别", probeMs, res.OcrSizeNote);
-        if (_chkSaveSample?.Checked == true)
-        {
-            ImagingIo.SaveFrame(snap, Path.Combine(_rt.DataDir, "samples", "probe_" + DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + ".jpg"));
-        }
-        _rt.Log.Info(string.Format("① 识别：{0} 置信 {1:F3}｜横幅 故事={2:F3} 在线={3:F3} 主菜单={4:F3}", res.Kind, res.Confidence, res.StoryScore, res.OnlineScore, res.HomeScore), "探测");
-        foreach (var d in res.DebugLines) _rt.Log.Info("   " + d, "探测");
-        _rt.Log.Info("   （探测只读，不再自动存样本/写盘）", "探测");
-        sb.Add("识别=" + res.Kind);
-
-        if (_rt.Machine.OpenPauseMenu(15))
-        {
-            var s1 = _rt.Machine.ReadMenuSnapshot();
-            _rt.Log.Info(string.Format("② 菜单已开：横幅 {0}（故事={1:F3}/在线={2:F3}）词证：{3}", s1.Kind, s1.StoryScore, s1.OnlineScore, Shorten(s1.StripWords, 64)), "探测");
-            _rt.Log.Info("   tab：选中=" + (s1.SelectedTab ?? "?") + "　白块x " + s1.WhiteX0 + ".." + s1.WhiteX1 + "　焦点行=" + (s1.FocusLabel ?? "(空)"), "探测");
-            sb.Add("菜单=开 tab=" + (s1.SelectedTab ?? "?"));
-
-            if (_rt.Machine.ProbeEnterListAndBack("地图", out var row))
-            {
-                _rt.Log.Info("③ 子菜单读数：焦点行=[" + row + "]（已按 B 退回）", "探测");
-                sb.Add("子菜单=" + row);
-            }
-            else { _rt.Log.Warn("③ 子菜单未读到焦点行", "探测"); sb.Add("子菜单=未读到"); }
-
-            _rt.Machine.ClosePauseMenu(8);
-        }
-        else { _rt.Log.Warn("② 打不开暂停菜单", "探测"); sb.Add("菜单=打不开"); }
-
-        foreach (var dir in new[] { "down", "up" })
-        {
-            bool seen = _rt.Machine.TryQuickGestureStandalone(dir, 20, cancelAfter: true);
-            sb.Add((dir == "down" ? "手势↓（进线上）" : "手势↑（回故事）") + (seen ? "=弹框已取消" : "=无弹框"));
-        }
-        _rt.Log.Hint("======== 探测完成：" + string.Join("　", sb) + " ========", "探测");
-    }
-
-    private static string Shorten(string s, int n) => s.Length <= n ? s : s.Substring(0, n) + "…";
-
     private void ToggleBlockSave()
     {
         bool ok = _rt.Firewall.Toggle();
@@ -785,7 +711,6 @@ public sealed class MainForm : Form
         s.Count = (int)_rounds.Value;
         s.WaitStartMins = (int)_waitMin.Value;
         s.UseFirewall = _useFw.Checked;
-        bool stay = _stayOnline.Checked;
         _rt.Store.Save(_rt.Settings);
         _shiftCts = new CancellationTokenSource();
         var ct = _shiftCts;
@@ -796,7 +721,7 @@ public sealed class MainForm : Form
             bool stopped = false;
             try
             {
-                bool ok = _rt.Jobs.RunShifts(s.Count, stay, () => ct.IsCancellationRequested);
+                bool ok = _rt.Jobs.RunShifts(s.Count, () => ct.IsCancellationRequested);
                 stopped = ct.IsCancellationRequested;
                 _rt.Log.Hint("班次结束 => " + (ok ? "OK 全部完成" : stopped ? "已按请求停止（安全收尾）" : "FAIL（看上面日志）"), "UI");
             }
@@ -1037,9 +962,6 @@ public sealed class MainForm : Form
                 + "　热键 " + _rt.Settings.Hotkeys.BlockAllKey);
             SetLight("OCR引擎", _rt.Ocr.Available ? LOk : LBad, _rt.Ocr.Name + (_rt.Ocr.Available ? "" : " 不可用"));
             SetLight("模板库", _rt.Bank.Templates.Count > 0 ? LOk : LBad, _rt.Bank.Templates.Count + " 张");
-            var q = _rt.Settings.QuickSwitch;
-            SetLight("快捷切换", (q.EnableOnlineEntry || q.EnableStoryReturn) ? LOk : LIdle,
-                "进线上=" + q.EnableOnlineEntry + "　回故事=" + q.EnableStoryReturn + "（摇杆上=回故事 / 下=进线上）");
             if (_blockLabel is not null) _blockLabel.Text = blocked ? "封存档：已封（F7 解除）" : "封存档：未封（F7 启用）";
             RefreshDataInfo();
         }

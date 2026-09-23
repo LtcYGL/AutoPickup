@@ -12,4 +12,4 @@ A 确保故事 → B 离线等计时 → C 关防火墙+进邀请战局 → D �
 E 开防火墙+清断连弹窗 → F 等货到 → G 末轮关窗云同步/回故事；任何失败先还原安全态。
 ## 目录
 Ui/ 向导与主控 | Core/Vision 识别 | Core/Capture 抓帧 | Core/Input 手柄 |
-Core/Audio 音量表 | Core/Net 防火墙 | Core/Fsm 状态机 | Core/Jobs 编排 | Config
+Core/Audio 音量表 | Core/Net 防火墙 | Core/Flow 原子流程引擎 | Core/Jobs 编排 | Config

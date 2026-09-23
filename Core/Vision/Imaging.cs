@@ -3,6 +3,19 @@ namespace AutoPickup.Core.Vision;
 /// <summary>基础图像算子（纯托管，无第三方依赖）。输入统一为 BGRA32 top-down。</summary>
 public static class Imaging
 {
+    /// <summary>灰度 -> BGRA32（A=255）。OCR 引擎只吃 BGRA，故灰度通道要扩成四通道。
+    /// 原先在 FlowEngine/ScreenReader/TabReader/Program 各有一份一模一样的实现，统一到这里。</summary>
+    public static byte[] GrayToBgra(byte[] gray)
+    {
+        var b = new byte[gray.Length * 4];
+        for (int i = 0, j = 0; i < gray.Length; i++, j += 4)
+        {
+            byte v = gray[i];
+            b[j] = v; b[j + 1] = v; b[j + 2] = v; b[j + 3] = 255;
+        }
+        return b;
+    }
+
     /// <summary>BGRA -> 灰度（BT.601 亮度，用整数近似）。</summary>
     public static byte[] BgraToGray(byte[] bgra, int width, int height)
     {

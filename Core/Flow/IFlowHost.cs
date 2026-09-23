@@ -32,10 +32,7 @@ public interface IFlowHost
 }
 
 /// <summary>一次观察的结果。观察必须无副作用（不按键），可安全重复调用。</summary>
-public sealed record Observed(string Kind, string Value, double? Score = null, string? Detail = null)
-{
-    public string Num => Value;
-}
+public sealed record Observed(string Kind, string Value, double? Score = null, string? Detail = null);
 
 /// <summary>动作执行后的回执：只说明“做了什么”，不判断成败（成败由 Gate 判）。</summary>
 public sealed record Acted(bool Done, string Detail);

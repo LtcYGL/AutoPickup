@@ -40,8 +40,6 @@ public sealed class GtaWindowSource
 
     public bool IsWindowValid => Handle != IntPtr.Zero;
 
-    public bool IsForeground => Handle != IntPtr.Zero && Win32.GetForegroundWindow() == Handle;
-
     public bool IsProcessRunning()
     {
         try
@@ -52,43 +50,6 @@ public sealed class GtaWindowSource
         catch { return false; }
     }
 
-    /// <summary>把窗口恢复到前台（游戏失焦可能忽略手柄输入/自动暂停）。</summary>
-    private const uint WM_ACTIVATE = 0x0006, WM_NCACTIVATE = 0x0086, WM_SETFOCUS = 0x0007;
-    private const int WA_ACTIVE = 1;
-
-    /// <summary>“假激活”：向游戏窗口投递 WM_ACTIVATE / WM_NCACTIVATE / WM_SETFOCUS，让游戏以为处于激活状态，
-    /// 但**不改变真实前台**（后台模式用，避免打断用户正在用的程序）。窗口需可见；最小化时无效。</summary>
-    public bool FakeActivate()
-    {
-        var h = Handle;
-        if (h == IntPtr.Zero) return false;
-        Win32.PostMessageW(h, WM_ACTIVATE, (IntPtr)WA_ACTIVE, h);
-        Win32.PostMessageW(h, WM_NCACTIVATE, (IntPtr)1, IntPtr.Zero);
-        Win32.PostMessageW(h, WM_SETFOCUS, IntPtr.Zero, IntPtr.Zero);
-        return true;
-    }
-
-    public bool BringToFront()
-    {
-        var h = Handle;
-        if (h == IntPtr.Zero) return false;
-        if (Win32.IsIconic(h)) Win32.ShowWindow(h, Win32.SW_RESTORE);
-        if (Win32.GetForegroundWindow() == h) return true;
-        Win32.SetForegroundWindow(h);
-        var fg = Win32.GetForegroundWindow();
-        if (fg != h)
-        {
-            var fgThread = Win32.GetWindowThreadProcessId(fg, out _);
-            var curThread = Win32.GetCurrentThreadId();
-            if (fgThread != curThread)
-            {
-                Win32.AttachThreadInput(curThread, fgThread, true);
-                Win32.SetForegroundWindow(h);
-                Win32.AttachThreadInput(curThread, fgThread, false);
-            }
-        }
-        return Win32.GetForegroundWindow() == h;
-    }
 
     public Frame CaptureClient()
     {
@@ -102,17 +63,26 @@ public sealed class GtaWindowSource
         if (pw is not null)
         {
             LastMethod = "PrintWindow";
-            return pw;
+            return Stamped(pw);
         }
 
         var bb = CaptureViaScreenBlt(h, w, ht);
         if (bb is not null)
         {
             LastMethod = "ScreenBitBlt";
-            return bb;
+            return Stamped(bb);
         }
         LastMethod = "None";
         return Frame.Empty;
+    }
+
+    private long _seq;
+
+    /// <summary>给这一帧打上序号：同一次抓帧的所有观察共用一份 OCR 结果。</summary>
+    private Frame Stamped(Frame f)
+    {
+        f.Seq = Interlocked.Increment(ref _seq);
+        return f;
     }
 
     /// <summary>PrintWindow 全内容渲染：即使被遮挡/不在前台也能拿到游戏自身画面。</summary>

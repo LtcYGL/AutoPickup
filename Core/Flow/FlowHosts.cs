@@ -103,6 +103,7 @@ public sealed class ReplayScript
 /// </summary>
 public sealed class ReplayFlowHost : IFlowHost
 {
+    private static long _hostSeq;
     private readonly List<(ReplayFrame Frame, Frame Image)> _frames = new();
     private readonly bool _quiet;
     private int _cur;
@@ -110,8 +111,6 @@ public sealed class ReplayFlowHost : IFlowHost
 
     public string Name { get; }
     public bool IsReplay => true;
-    public int CurrentIndex => _cur;
-    public string CurrentPath => _cur >= 0 && _cur < _frames.Count ? _frames[_cur].Frame.Path : "(none)";
 
     public ReplayFlowHost(string scriptPath, bool quiet = false)
     {
@@ -121,10 +120,12 @@ public sealed class ReplayFlowHost : IFlowHost
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? throw new InvalidOperationException("脚本解析失败");
         string dir = Path.GetDirectoryName(Path.GetFullPath(scriptPath)) ?? ".";
         Name = "回放:" + (string.IsNullOrEmpty(script.Name) ? Path.GetFileNameWithoutExtension(scriptPath) : script.Name);
+        long baseSeq = Interlocked.Increment(ref _hostSeq) * 1_000_000L;
         foreach (var f in script.Frames)
         {
             var img = ImagingIo.LoadImage(Path.Combine(dir, f.Path));
             if (img is null) throw new FileNotFoundException("回放帧缺失: " + f.Path + "（" + dir + "）");
+            img.Seq = baseSeq + _frames.Count + 1;   // 同一回放帧=同一序号，重复观察共用一次 OCR
             _frames.Add((f, img));
         }
         if (_frames.Count == 0) throw new InvalidOperationException("回放脚本没有帧");
@@ -174,7 +175,6 @@ public sealed class ReplayFlowHost : IFlowHost
         }
     }
 
-    /// <summary>当前虚拟时间（毫秒），供日志/断言。</summary>
-    public long VirtualMs => _virtualMs;
+
     public bool Firewall(bool enable) => true;   // 回放视作成功（防火墙与画面无关）
 }

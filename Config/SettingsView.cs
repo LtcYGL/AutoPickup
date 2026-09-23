@@ -21,6 +21,7 @@ public sealed class SettingsView : ICustomTypeDescriptor
         _root = settings;
         var list = new List<PropertyDescriptor>();
         var seen = new HashSet<string>();
+        int order = 0;
         foreach (var secProp in typeof(AppSettings).GetProperties())
         {
             if (secProp.GetIndexParameters().Length > 0) continue;
@@ -34,15 +35,27 @@ public sealed class SettingsView : ICustomTypeDescriptor
                 string cat = p.GetCustomAttribute<CategoryAttribute>()?.Category ?? "其它";
                 string disp = p.GetCustomAttribute<DisplayNameAttribute>()?.DisplayName ?? p.Name;
                 string desc = p.GetCustomAttribute<DescriptionAttribute>()?.Description ?? "";
-                list.Add(new LeafProperty(sec, p, name, cat, disp, desc));
+                list.Add(new LeafProperty(sec, p, name, cat, disp, desc, order++));
             }
         }
+        // 排序：先按分类的数字前缀（原来直接用序数比，两位数分类会排到一位数前面），
+        // 同一分类内按**声明顺序**（原来按 DisplayName 序数比，中文等于按 Unicode 码位，组内是乱的）。
         list.Sort((a, b) =>
         {
-            int c = string.CompareOrdinal(a.Category, b.Category);
-            return c != 0 ? c : string.CompareOrdinal(a.DisplayName, b.DisplayName);
+            int c = CategoryOrder(a.Category).CompareTo(CategoryOrder(b.Category));
+            if (c == 0) c = string.CompareOrdinal(a.Category, b.Category);
+            if (c == 0) c = ((LeafProperty)a).Order.CompareTo(((LeafProperty)b).Order);
+            return c;
         });
         _props = new PropertyDescriptorCollection(list.ToArray());
+    }
+
+    /// <summary>分类的数字前缀（如 "12 xxx"=12）；没有数字前缀的排到最后。</summary>
+    private static int CategoryOrder(string s)
+    {
+        int i = 0;
+        while (i < s.Length && char.IsDigit(s[i])) i++;
+        return i > 0 && int.TryParse(s.Substring(0, i), out int n) ? n : int.MaxValue;
     }
 
     public AttributeCollection GetAttributes()
@@ -93,7 +106,7 @@ public sealed class SettingsView : ICustomTypeDescriptor
         private readonly string _category;
         private readonly string _display;
 
-        public LeafProperty(object target, PropertyInfo info, string name, string category, string display, string description)
+        public LeafProperty(object target, PropertyInfo info, string name, string category, string display, string description, int order)
             : base(name, new Attribute[]
             {
                 new CategoryAttribute(category),
@@ -105,9 +118,12 @@ public sealed class SettingsView : ICustomTypeDescriptor
             _info = info;
             _category = category;
             _display = display;
+            Order = order;
         }
 
         public object Target => _target;
+        /// <summary>声明顺序（排序用，保证参数页按作者书写顺序展示）。</summary>
+        public int Order { get; }
 
         /// <summary>绕过界面缓存，直接从配置对象读当前值。</summary>
         public object? ReadDirect() => _info.GetValue(_target);

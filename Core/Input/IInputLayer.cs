@@ -21,6 +21,5 @@ public interface IInputLayer : IDisposable
     bool TryQuickLook(QuickLookDir dir, int wheelHoldMs, int lookHoldMs, double magnitude);
 }
 
-/// <summary>快捷轮盘推向的物理方向（Up=上、Down=下）。目标语义实机定稿：上=回故事(线下)、下=进线上；
-/// 由 NetmodeMachine 按 AppSettings.QuickSwitch.OnlineIsUp=false 解析为 进线上=Down / 回故事=Up。</summary>
+/// <summary>快捷轮盘推向的物理方向（Up=上、Down=下）。语义：上=回故事(线下)、下=进线上（与流程 JSON 的 gesture dir 一致）。</summary>
 public enum QuickLookDir { Up, Down }

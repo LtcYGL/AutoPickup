@@ -1,0 +1,181 @@
+{
+  "name": "return-story",
+  "description": "回到线下故事模式：轮盘手势优先，失败回退暂停菜单。流程页模式测试、失败轮收尾与停止收尾用",
+  "steps": [
+    {
+      "id": "leave_menu",
+      "title": "清场（收起菜单）",
+      "action": {
+        "op": "menu",
+        "mode": "close"
+      },
+      "observe": [
+        "menuopen"
+      ],
+      "expect": [
+        "ctx:menuopen eq false"
+      ],
+      "timeoutSec": 4,
+      "retry": {
+        "max": 2,
+        "intervalMs": 1000
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "gesture_return",
+      "title": "回故事手势",
+      "action": {
+        "op": "gesture",
+        "dir": "up"
+      },
+      "observe": [
+        "dialog"
+      ],
+      "expect": [
+        "ctx:dialog eq true"
+      ],
+      "timeoutSec": 7,
+      "retry": {
+        "max": 2,
+        "intervalMs": 3000
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_return_menu",
+      "title": "回退·开菜单",
+      "require": [
+        "fact:gesture_return.ok eq false"
+      ],
+      "action": {
+        "op": "menu",
+        "mode": "open"
+      },
+      "observe": [
+        "menuopen"
+      ],
+      "expect": [
+        "ctx:menuopen eq true"
+      ],
+      "timeoutSec": 15,
+      "retry": {
+        "max": 2,
+        "intervalMs": 1500
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_return_tab",
+      "title": "回退·切在线页",
+      "require": [
+        "fact:gesture_return.ok eq false"
+      ],
+      "action": {
+        "op": "tab",
+        "target": "在线"
+      },
+      "observe": [
+        "selectedtab"
+      ],
+      "expect": [
+        "ctx:selectedtab like 在线"
+      ],
+      "retry": {
+        "max": 3,
+        "intervalMs": 800
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_return_nav",
+      "title": "回退·选中「退至故事模式」",
+      "require": [
+        "fact:gesture_return.ok eq false"
+      ],
+      "action": {
+        "op": "navigate",
+        "name": "退至故事模式",
+        "target": "DPadDown",
+        "times": 20
+      },
+      "observe": [
+        "focusrow"
+      ],
+      "expect": [
+        "ctx:focusrow like 退至故事模式"
+      ],
+      "timeoutSec": 20,
+      "retry": {
+        "max": 3,
+        "intervalMs": 1000
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "fb_return_go",
+      "title": "回退·确认退出",
+      "require": [
+        "fact:gesture_return.ok eq false"
+      ],
+      "action": {
+        "op": "tap",
+        "button": "A"
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "confirm_return",
+      "title": "确认弹窗（回故事）",
+      "action": {
+        "op": "tap",
+        "button": "A"
+      },
+      "observe": [
+        "dialog"
+      ],
+      "expect": [
+        "ctx:dialog eq false"
+      ],
+      "timeoutSec": 25,
+      "retry": {
+        "max": 2,
+        "intervalMs": 2000
+      },
+      "onFail": "continue"
+    },
+    {
+      "id": "wait_story",
+      "title": "等待到达故事",
+      "action": {
+        "op": "waitmode",
+        "target": "story",
+        "ms": 180
+      },
+      "expect": [
+        "fact:mode_reached eq true"
+      ],
+      "onFail": "continue"
+    },
+    {
+      "id": "close_menu",
+      "title": "关菜单",
+      "action": {
+        "op": "menu",
+        "mode": "close"
+      },
+      "observe": [
+        "menuopen"
+      ],
+      "expect": [
+        "ctx:menuopen eq false"
+      ],
+      "timeoutSec": 4,
+      "retry": {
+        "max": 2,
+        "intervalMs": 800
+      },
+      "onFail": "continue"
+    }
+  ]
+}

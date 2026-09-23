@@ -16,6 +16,18 @@ public sealed class FirewallController
     private readonly AppSettings _settings;
     private readonly object _lock = new();
 
+    // ---- 进程内状态记忆：每次 netsh 调用 100~800ms，能不问就不问 ----
+    /// <summary>本进程内我们建过的“封存档”规则一定存在（真被外部删了 netsh 会失败，再回退查询）。</summary>
+    private bool _lastExists;
+    /// <summary>最近一次已知的启用状态（null=未知，第一次仍走真实查询）。</summary>
+    private bool? _lastEnabled;
+    /// <summary>上次解析存档 IP 的时间；超过 IpRefreshHours 才重新解析（域名换 CDN IP 时用一次慢路径刷新）。</summary>
+    private DateTime _ipResolvedUtc = DateTime.MinValue;
+    private bool _lastBlockAllExists;
+    private bool? _lastBlockAllEnabled;
+    /// <summary>快路径“沿用上次解析的 IP”的有效期（参数页「IP刷新周期(小时)」，默认 6）。</summary>
+    private double IpRefreshHours => _settings.Firewall.IpRefreshHours;
+
     public FirewallController(LogBus log, AppSettings settings)
     {
         _log = log;
@@ -32,18 +44,22 @@ public sealed class FirewallController
         return '"' + s + '"';
     }
 
-    /// <summary>封网对象：解析存档域名的全部 IPv4 + 附加固定 IP（云存档会换 CDN IP）。</summary>
+    /// <summary>封网对象：IP 库网段（整段封锁 Rockstar 存档/交易服）+ 附加固定 IP + 解析存档域名的全部 IPv4。
+    /// 已被网段覆盖的单个 IP 不再重复写进规则，remoteip 保持最小集。</summary>
     private List<string> ResolveTargets()
     {
         var set = new HashSet<string>();
+        var pool = new List<string>();
+        foreach (var c in _settings.Firewall.BlockCidrs)
+            if (!string.IsNullOrWhiteSpace(c)) { pool.Add(c.Trim()); set.Add(c.Trim()); }
         foreach (var ip in _settings.Firewall.ExtraIps)
-            if (!string.IsNullOrWhiteSpace(ip)) set.Add(ip.Trim());
+            if (!string.IsNullOrWhiteSpace(ip) && !Covered(pool, ip)) set.Add(ip.Trim());
         foreach (var d in _settings.Firewall.BlockDomains)
         {
             try
             {
                 foreach (var addr in Dns.GetHostAddresses(d.Trim()))
-                    if (addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    if (addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !Covered(pool, addr.ToString()))
                         set.Add(addr.ToString());
             }
             catch (Exception e)
@@ -52,6 +68,31 @@ public sealed class FirewallController
             }
         }
         return set.ToList();
+    }
+
+    private static bool Covered(List<string> cidrs, string ip)
+    {
+        foreach (var c in cidrs) if (CidrCovers(c, ip)) return true;
+        return false;
+    }
+
+    /// <summary>ip（IPv4）是否落在 cidr（如 192.81.241.0/24）内。</summary>
+    private static bool CidrCovers(string cidr, string ip)
+    {
+        var parts = cidr.Split('/');
+        if (parts.Length != 2 || !IPAddress.TryParse(parts[0], out var net) || !IPAddress.TryParse(ip, out var addr)) return false;
+        var nb = net.GetAddressBytes();
+        var ab = addr.GetAddressBytes();
+        if (nb.Length != 4 || ab.Length != 4) return false;
+        if (!int.TryParse(parts[1], out int bits) || bits < 0 || bits > 32) return false;
+        for (int i = 0; i < 4; i++)
+        {
+            int take = Math.Clamp(bits - i * 8, 0, 8);
+            if (take == 0) break;
+            byte mask = (byte)(0xFF << (8 - take));
+            if ((nb[i] & mask) != (ab[i] & mask)) return false;
+        }
+        return true;
     }
 
     private (bool ok, string stdout, string stderr) Netsh(string args)
@@ -79,29 +120,9 @@ public sealed class FirewallController
         }
     }
 
-    private bool ExistsCore()
-    {
-        var (ok, so, _) = Netsh("show rule name=" + RuleName);
-        return ok
-            && !so.Contains("No rules match", StringComparison.OrdinalIgnoreCase)
-            && !so.Contains("没有匹配的规则", StringComparison.OrdinalIgnoreCase);
-    }
+    private bool ExistsCore() => RuleExistsCore(RuleName);
 
-    private bool? EnabledCore()
-    {
-        var (ok, so, _) = Netsh("show rule name=" + RuleName + " verbose");
-        if (!ok) return null;
-        foreach (var line in so.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries))
-        {
-            var t = line.Trim();
-            if (t.StartsWith("Enabled:", StringComparison.OrdinalIgnoreCase))
-                return t.Contains("Yes", StringComparison.OrdinalIgnoreCase)
-                    || t.Contains("是", StringComparison.OrdinalIgnoreCase);
-            if (t.StartsWith("已启用:"))
-                return t.Contains("是");
-        }
-        return null;
-    }
+    private bool? EnabledCore() => EnabledCoreOf(RuleName);
 
     /// <summary>静默存在性查询（状态灯/周期刷新用，不写日志，避免刷屏）。</summary>
     public bool ExistsQuiet()
@@ -140,7 +161,12 @@ public sealed class FirewallController
                 + " remoteip=" + Q(string.Join(",", targets))
                 + " enable=no";
             var (ok, _, se) = Netsh(args);
-            if (ok) _log.Okay("规则已添加（封 TCP: " + string.Join(",", targets) + "）", "Firewall");
+            if (ok)
+            {
+                _lastExists = true; _lastEnabled = false;
+                _ipResolvedUtc = DateTime.UtcNow;
+                _log.Okay("规则已添加（封 TCP: " + string.Join(",", targets) + "）", "Firewall");
+            }
             else _log.Error("添加规则失败: " + se, "Firewall");
             return ok;
         }
@@ -156,7 +182,11 @@ public sealed class FirewallController
                 return true;
             }
             var (ok, _, se) = Netsh("delete rule name=" + RuleName);
-            if (ok) _log.Okay("规则已删除: " + RuleName, "Firewall");
+            if (ok)
+            {
+                _lastExists = false; _lastEnabled = false; _ipResolvedUtc = DateTime.MinValue;
+                _log.Okay("规则已删除: " + RuleName, "Firewall");
+            }
             else _log.Error("删除失败: " + se, "Firewall");
             return ok;
         }
@@ -166,7 +196,23 @@ public sealed class FirewallController
     {
         lock (_lock)
         {
+            // 快路径（1 次 netsh ≈0.1s）：规则本进程建过、IP 还新鲜 → 只翻开关。
+            // 原来每次都 delete+add+DNS 解析，单次实测 0.52~7.3s，全落在“下云 cue 命中后立刻封网”的关键窗口里。
+            if (_lastExists && (DateTime.UtcNow - _ipResolvedUtc).TotalHours < IpRefreshHours)
+            {
+                var (fok, _, fse) = Netsh("set rule name=" + RuleName + " new enable=yes");
+                if (fok)
+                {
+                    _lastEnabled = true;
+                    _log.Okay("防火墙规则已启用（沿用上次解析的 IP）", "Firewall");
+                    return true;
+                }
+                _log.Warn("快路径启用失败，回退重建规则: " + fse, "Firewall");
+            }
+            // 慢路径（首次启动 / 超 6 小时 / 快路径失败）要重建规则：必须先删掉同名旧规则，
+            // 否则每次启动都只加不删，系统里会越堆越多同名 AutoPickupBlock。
             if (ExistsCore()) Netsh("delete rule name=" + RuleName);
+            _lastExists = false;
             var targets = ResolveTargets();
             if (targets.Count == 0)
             {
@@ -178,7 +224,12 @@ public sealed class FirewallController
                 + " remoteip=" + Q(string.Join(",", targets))
                 + " enable=yes";
             var (ok, _, se) = Netsh(args);
-            if (ok) _log.Okay("防火墙规则已启用（封 TCP: " + string.Join(",", targets) + "）", "Firewall");
+            if (ok)
+            {
+                _lastExists = true; _lastEnabled = true;
+                _ipResolvedUtc = DateTime.UtcNow;
+                _log.Okay("防火墙规则已启用（封 TCP: " + string.Join(",", targets) + "）", "Firewall");
+            }
             else _log.Error("启用失败: " + se, "Firewall");
             return ok;
         }
@@ -188,12 +239,21 @@ public sealed class FirewallController
     {
         lock (_lock)
         {
-            if (!ExistsCore()) { _log.Warn("规则不存在，无法禁用", "Firewall"); return false; }
-            if (EnabledCore() == false) { _log.Info("规则已禁用，跳过", "Firewall"); return true; }
-            var (ok, _, se) = Netsh("set rule name=" + RuleName + " new enable=no");
-            if (ok) _log.Okay("防火墙规则已禁用（网络恢复）", "Firewall");
-            else _log.Error("禁用失败: " + se, "Firewall");
-            return ok;
+            // 已知是关的：直接返回。收尾路径会禁用两次（流程末 + cleanup），第二次不该再问 netsh。
+            if (_lastExists && _lastEnabled == false) return true;
+            if (_lastExists || ExistsCore())
+            {
+                var (ok, _, se) = Netsh("set rule name=" + RuleName + " new enable=no");
+                if (ok)
+                {
+                    _lastExists = true; _lastEnabled = false;
+                    _log.Okay("防火墙规则已禁用（网络恢复）", "Firewall");
+                }
+                else _log.Error("禁用失败: " + se, "Firewall");
+                return ok;
+            }
+            _log.Warn("规则不存在，无法禁用", "Firewall");
+            return false;
         }
     }
 
@@ -202,13 +262,14 @@ public sealed class FirewallController
     {
         lock (_lock)
         {
-            if (!ExistsCore())
+            if (!_lastExists && !ExistsCore())
             {
                 _log.Info("封存档：规则不存在 → 创建并启用", "Firewall");
                 if (!AddRule("")) return false;
                 return Enable();
             }
-            if (EnabledCore() == true)
+            bool on = _lastEnabled ?? EnabledCore() ?? false;
+            if (on)
             {
                 _log.Info("封存档：当前启用 → 禁用（恢复联网）", "Firewall");
                 return Disable();
@@ -230,6 +291,7 @@ public sealed class FirewallController
                     if (RuleExistsCore(name) && EnabledCoreOf(name) == true)
                     {
                         Netsh("set rule name=" + name + " new enable=no");
+                        if (name == RuleName) _lastEnabled = false; else _lastBlockAllEnabled = false;
                         _log.Okay("退出清理：已禁用防火墙规则 " + name, "Firewall");
                     }
                 }
@@ -256,25 +318,36 @@ public sealed class FirewallController
     {
         lock (_lock)
         {
+            string what = _settings.Firewall.BlockAllUseProtocols ? "TCP+UDP 全部出站" : "全部出站(any)";
+            if (_lastBlockAllEnabled == true) return true;
+            // 快路径：规则已在 → 只翻开关（全封要能在“检测到加速器”时几十毫秒内落下）
+            if (_lastBlockAllExists || RuleExistsCore(BlockAllRuleName))
+            {
+                var (sok, _, sse) = Netsh("set rule name=" + BlockAllRuleName + " new enable=yes");
+                if (sok)
+                {
+                    _lastBlockAllExists = true; _lastBlockAllEnabled = true;
+                    _log.Okay("完全断网已启用（故意掉线，" + what + "）", "Firewall");
+                    return true;
+                }
+                _log.Warn("快路径启用失败，回退重建完全断网规则: " + sse, "Firewall");
+            }
             if (RuleExistsCore(BlockAllRuleName)) Netsh("delete rule name=" + BlockAllRuleName);
             bool ok;
-            string what;
             if (_settings.Firewall.BlockAllUseProtocols)
             {
                 var (ok1, _, se1) = Netsh("add rule name=" + BlockAllRuleName + " dir=out action=block protocol=TCP enable=yes");
                 var (ok2, _, se2) = Netsh("add rule name=" + BlockAllRuleName + " dir=out action=block protocol=UDP enable=yes");
                 ok = ok1 && ok2;
-                what = "TCP+UDP 全部出站";
                 if (!ok) { _log.Error("完全断网启用失败: " + (ok1 ? se2 : se1), "Firewall"); return false; }
             }
             else
             {
                 var (okA, _, seA) = Netsh("add rule name=" + BlockAllRuleName + " dir=out action=block protocol=any enable=yes");
                 ok = okA;
-                what = "全部出站(any)";
                 if (!ok) { _log.Error("完全断网启用失败: " + seA, "Firewall"); return false; }
             }
-            if (ok) _log.Okay("完全断网已启用（故意掉线，" + what + "）", "Firewall");
+            if (ok) { _lastBlockAllExists = true; _lastBlockAllEnabled = true; _log.Okay("完全断网已启用（故意掉线，" + what + "）", "Firewall"); }
             return ok;
         }
     }
@@ -283,10 +356,10 @@ public sealed class FirewallController
     {
         lock (_lock)
         {
-            if (!RuleExistsCore(BlockAllRuleName)) { _log.Warn("完全断网规则不存在", "Firewall"); return false; }
-            if (EnabledCoreOf(BlockAllRuleName) == false) { _log.Info("完全断网已禁用，跳过", "Firewall"); return true; }
+            if (_lastBlockAllEnabled == false) { _log.Info("完全断网已禁用，跳过", "Firewall"); return true; }
+            if (!_lastBlockAllExists && !RuleExistsCore(BlockAllRuleName)) { _log.Warn("完全断网规则不存在", "Firewall"); return false; }
             var (ok, _, se) = Netsh("set rule name=" + BlockAllRuleName + " new enable=no");
-            if (ok) _log.Okay("完全断网已解除（网络恢复）", "Firewall");
+            if (ok) { _lastBlockAllExists = true; _lastBlockAllEnabled = false; _log.Okay("完全断网已解除（网络恢复）", "Firewall"); }
             else _log.Error("完全断网解除失败: " + se, "Firewall");
             return ok;
         }
@@ -316,6 +389,7 @@ public sealed class FirewallController
                 ok = a;
                 if (!ok) { _log.Error("添加完全断网规则失败: " + ea, "Firewall"); return false; }
             }
+            _lastBlockAllExists = true; _lastBlockAllEnabled = false;
             _log.Okay("完全断网规则已添加（默认禁用）", "Firewall");
             return true;
         }
@@ -345,31 +419,37 @@ public sealed class FirewallController
         {
             if (!RuleExistsCore(BlockAllRuleName)) return true;
             var (ok, _, se) = Netsh("delete rule name=" + BlockAllRuleName);
-            if (ok) _log.Okay("完全断网规则已删除", "Firewall");
+            if (ok)
+            {
+                _lastBlockAllExists = false; _lastBlockAllEnabled = false;
+                _log.Okay("完全断网规则已删除", "Firewall");
+            }
             else _log.Error("完全断网规则删除失败: " + se, "Firewall");
             return ok;
         }
     }
 
-    /// <summary>对任意规则名做存在性检查（原 ExistsCore 只认封存档规则）。</summary>
+    /// <summary>规则是否存在：netsh 找不到时退出码非 0，输出里也会写“没有匹配的规则 / No rules match”。</summary>
     private bool RuleExistsCore(string name)
     {
         var (ok, stdout, _) = Netsh("show rule name=" + name);
-        return ok && (stdout.Contains("Yes") || stdout.Contains("No") || stdout.Contains(name));
+        if (!ok) return false;
+        if (stdout.Contains("No rules match", StringComparison.OrdinalIgnoreCase)) return false;
+        if (stdout.Contains("没有匹配的规则")) return false;
+        return true;
     }
 
+    /// <summary>启用状态查询（中英双语输出都认）：Enabled: Yes/No 或 已启用: 是/否。</summary>
     private bool? EnabledCoreOf(string name)
     {
-        var (ok, stdout, _) = Netsh("show rule name=" + name);
+        var (ok, stdout, _) = Netsh("show rule name=" + name + " verbose");
         if (!ok) return null;
         foreach (var line in stdout.Split('\n'))
         {
             var t = line.Trim();
-            if (t.StartsWith("Enabled:", StringComparison.OrdinalIgnoreCase))
-            {
-                if (t.EndsWith("Yes", StringComparison.OrdinalIgnoreCase)) return true;
-                if (t.EndsWith("No", StringComparison.OrdinalIgnoreCase)) return false;
-            }
+            if (!t.StartsWith("Enabled:", StringComparison.OrdinalIgnoreCase) && !t.StartsWith("已启用:")) continue;
+            if (t.Contains("Yes", StringComparison.OrdinalIgnoreCase) || t.Contains("是")) return true;
+            if (t.Contains("No", StringComparison.OrdinalIgnoreCase) || t.Contains("否")) return false;
         }
         return null;
     }

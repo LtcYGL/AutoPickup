@@ -7,6 +7,8 @@ namespace AutoPickup.Core.Vision;
 /// <summary>Frame 与磁盘/图片的互转（调试、截图校准用）。</summary>
 public static class ImagingIo
 {
+    private static long _seq;
+
     public static Frame? LoadImage(string path)
     {
         try
@@ -21,7 +23,9 @@ public static class ImagingIo
             var bytes = new byte[w * h * 4];
             System.Runtime.InteropServices.Marshal.Copy(data.Scan0, bytes, 0, bytes.Length);
             bmp.UnlockBits(data);
-            return new Frame(w, h, bytes);
+            var frame = new Frame(w, h, bytes);
+            frame.Seq = System.Threading.Interlocked.Increment(ref _seq);
+            return frame;
         }
         catch (Exception)
         {

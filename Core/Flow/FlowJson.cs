@@ -74,10 +74,12 @@ public static class FlowJson
             Mode = d.Action?.Mode ?? "open",
             Target = d.Action?.Target ?? "",
             Name = d.Action?.Name ?? "",
+            Setting = d.Action?.Setting ?? "",
         },
         Pre = MapConds(d.Pre),
         Expect = MapConds(d.Expect),
         TimeoutSec = d.TimeoutSec ?? 0,
+        TimeoutSetting = d.TimeoutSetting ?? "",
         Retry = new RetrySpec { Max = d.Retry?.Max ?? 1, IntervalMs = d.Retry?.IntervalMs ?? 1500 },
         OnFail = d.OnFail ?? "abort",
     };
@@ -150,6 +152,7 @@ public static class FlowJson
         [JsonConverter(typeof(ConditionListConverter))] public List<CondDto>? Pre { get; set; }
         [JsonConverter(typeof(ConditionListConverter))] public List<CondDto>? Expect { get; set; }
         public int? TimeoutSec { get; set; }
+        public string? TimeoutSetting { get; set; }
         public RetryDto? Retry { get; set; }
         public string? OnFail { get; set; }
     }
@@ -165,6 +168,8 @@ public static class FlowJson
         public string? Mode { get; set; }
         public string? Target { get; set; }
         public string? Name { get; set; }
+        /// <summary>sleep 原子用：从参数页按名字取毫秒数（如 "AfterHintWaitSec"）</summary>
+        public string? Setting { get; set; }
     }
 
     private sealed class RetryDto
