@@ -11,17 +11,22 @@ public sealed class CloudCueDetector
 {
     private readonly LogBus _log;
     private readonly AppSettings.AudioSection _a;
-    private readonly Queue<float> _short = new(); // 1s @100ms
-    private readonly Queue<float> _longQ = new(); // 用于安静判定(最近 2.5s)
+    private readonly Queue<float> _short = new();   // ~1s 短窗
+    private readonly Queue<float> _longQ = new();   // ~2.5s，用于安静判定
     private long _startTs;
     private bool _quietOk;
-    private int _quietSamplesNeeded;
+    /// <summary>窗口按“秒”换算成样本数，跟着参数页「采样间隔(ms)」走 —— 以前写死 10/25 个样本，
+    /// 改采样间隔后“1 秒短窗”“2.5 秒静音前提”就失真了（调快调慢都会误判）。</summary>
+    private readonly int _shortN;
+    private readonly int _longN;
 
     public CloudCueDetector(LogBus log, AppSettings.AudioSection audio)
     {
         _log = log;
         _a = audio;
-        _quietSamplesNeeded = 25; // ~2.5s 静音前提（避开确认键提示音）
+        int iv = Math.Max(20, audio.SampleIntervalMs);
+        _shortN = Math.Max(2, (int)Math.Round(1000.0 / iv));
+        _longN = Math.Max(_shortN, (int)Math.Round(2500.0 / iv));
     }
 
     public void Begin()
@@ -42,9 +47,9 @@ public sealed class CloudCueDetector
         lock (_lock)
         {
             _short.Enqueue(peak);
-            while (_short.Count > 10) _short.Dequeue();
+            while (_short.Count > _shortN) _short.Dequeue();
             _longQ.Enqueue(peak);
-            while (_longQ.Count > 25) _longQ.Dequeue();
+            while (_longQ.Count > _longN) _longQ.Dequeue();
             if (Environment.TickCount64 - _startTs < 1000) return false; // 起步缓冲
 
             // 安静判定：最近 ~2s 平均 < 8%
@@ -52,7 +57,7 @@ public sealed class CloudCueDetector
             double longAvg = la.Average();
             if (!_quietOk)
             {
-                if (longAvg < 0.08 && la.Length >= _quietSamplesNeeded)
+                if (longAvg < 0.08 && la.Length >= _longN)
                 {
                     _quietOk = true;
                     _log.Info("静音基线确认（avg=" + (longAvg * 100).ToString("F1") + "%）", "Audio");

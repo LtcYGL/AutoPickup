@@ -19,12 +19,12 @@ public sealed class FirewallController
     // ---- 进程内状态记忆：每次 netsh 调用 100~800ms，能不问就不问 ----
     /// <summary>本进程内我们建过的“封存档”规则一定存在（真被外部删了 netsh 会失败，再回退查询）。</summary>
     private bool _lastExists;
+    /// <summary>退出收尾开始后置位：拒绝任何新的封网操作，防止仍在跑的班次在清理之后又把规则打开。</summary>
+    private volatile bool _shuttingDown;
     /// <summary>最近一次已知的启用状态（null=未知，第一次仍走真实查询）。</summary>
     private bool? _lastEnabled;
     /// <summary>上次解析存档 IP 的时间；超过 IpRefreshHours 才重新解析（域名换 CDN IP 时用一次慢路径刷新）。</summary>
     private DateTime _ipResolvedUtc = DateTime.MinValue;
-    private bool _lastBlockAllExists;
-    private bool? _lastBlockAllEnabled;
     /// <summary>快路径“沿用上次解析的 IP”的有效期（参数页「IP刷新周期(小时)」，默认 6）。</summary>
     private double IpRefreshHours => _settings.Firewall.IpRefreshHours;
 
@@ -35,8 +35,8 @@ public sealed class FirewallController
     }
 
     public string RuleName => _settings.Firewall.RuleName;
-    /// <summary>“完全断网（故意掉线）”的独立规则名。</summary>
-    public string BlockAllRuleName => _settings.Firewall.BlockAllRuleName;
+    /// <summary>已废弃的旧版“完全断网”规则名：启动自愈时清掉，避免残留规则一直拦着用户的机器。</summary>
+    private const string LegacyBlockAllRuleName = "AutoPickupBlockAll";
 
     private static string Q(string s)
     {
@@ -145,7 +145,7 @@ public sealed class FirewallController
         lock (_lock) return EnabledCore();
     }
 
-    public bool AddRule(string processPath = "")
+    public bool AddRule()
     {
         lock (_lock)
         {
@@ -192,22 +192,54 @@ public sealed class FirewallController
         }
     }
 
+    /// <summary>
+    /// 关键窗口预置：在“等下云 cue”那几十秒~几分钟里，先把规则建好并保持**禁用**，
+    /// 这样 cue 命中时只剩一次开关（实测 ~0.26s）。
+    /// 不预置的话，慢路径的 delete+add+域名解析（实测 0.5~1.0s）、以及快路径探测失败后的
+    /// 回退（实测有 8.8s / 10.7s 两次），全部压在“cue→封网”这段最要命的时间里 ——
+    /// 表现就是“封网不实时”，甚至等它封上时游戏已经把云存档写完了。
+    /// </summary>
+    public bool Arm()
+    {
+        lock (_lock)
+        {
+            if (_shuttingDown) { _log.Warn("正在退出，已拒绝封网预置", "Firewall"); return false; }
+            if (_lastExists && (DateTime.UtcNow - _ipResolvedUtc).TotalHours < IpRefreshHours)
+            {
+                // 规则在、IP 新鲜。但若它当前是**启用**态（上一轮清理失败、或手工 F7 打开），
+                // 这里必须关掉：封网时机由流程的 cue 决定，提前封会把“下云”下载本身掐断。
+                if ((_lastEnabled ?? EnabledCore()) == true) Disable();
+                return true;
+            }
+            bool ok = AddRule();
+            if (ok) _log.Info("封网预置完成：规则就绪且禁用（cue 命中后只需 1 次开关）", "Firewall");
+            return ok;
+        }
+    }
+
     public bool Enable()
     {
         lock (_lock)
         {
+            if (_shuttingDown) { _log.Warn("正在退出，已拒绝封网操作", "Firewall"); return false; }
             // 快路径（1 次 netsh ≈0.1s）：规则本进程建过、IP 还新鲜 → 只翻开关。
             // 原来每次都 delete+add+DNS 解析，单次实测 0.52~7.3s，全落在“下云 cue 命中后立刻封网”的关键窗口里。
             if (_lastExists && (DateTime.UtcNow - _ipResolvedUtc).TotalHours < IpRefreshHours)
             {
+                var swFast = Stopwatch.StartNew();
                 var (fok, _, fse) = Netsh("set rule name=" + RuleName + " new enable=yes");
-                if (fok)
+                // **必须回读验证**：规则若已被外部删除（例如用户执行过 netsh advfirewall reset），
+                // `set` 匹配不到任何规则却仍以“成功”退出 —— 于是我们记了“已启用”，系统里其实没有规则，
+                // 而 UI 另查一次状态就会永远显示“已解除”。慢路径（delete+add）才是可靠结果。
+                if (fok && EnabledCoreOf(RuleName) == true)
                 {
                     _lastEnabled = true;
                     _log.Okay("防火墙规则已启用（沿用上次解析的 IP）", "Firewall");
                     return true;
                 }
-                _log.Warn("快路径启用失败，回退重建规则: " + fse, "Firewall");
+                _log.Warn((fok ? "快路径 set 后规则并未启用（可能已被外部删除），改为重建规则"
+                               : ("快路径启用失败，回退重建规则: " + fse))
+                              + "（快路径耗时 " + swFast.ElapsedMilliseconds + "ms）", "Firewall");
             }
             // 慢路径（首次启动 / 超 6 小时 / 快路径失败）要重建规则：必须先删掉同名旧规则，
             // 否则每次启动都只加不删，系统里会越堆越多同名 AutoPickupBlock。
@@ -239,8 +271,8 @@ public sealed class FirewallController
     {
         lock (_lock)
         {
-            // 已知是关的：直接返回。收尾路径会禁用两次（流程末 + cleanup），第二次不该再问 netsh。
-            if (_lastExists && _lastEnabled == false) return true;
+            // 注意：这里**不能**因为“缓存说已禁用”就跳过。状态若被另一个实例或外部工具改过，
+            // 跳过就等于把它留在启用态 —— 症状是游戏一直“无法从云服务器下载存档”。一次 set 只要 ~0.1~1s。
             if (_lastExists || ExistsCore())
             {
                 var (ok, _, se) = Netsh("set rule name=" + RuleName + " new enable=no");
@@ -257,176 +289,129 @@ public sealed class FirewallController
         }
     }
 
-    /// <summary>“封存档”开关（F11 即时切换）：不存在→创建并启用；已启用→禁用；已禁用→启用。</summary>
-    public bool Toggle()
+    /// <summary>“封存档”开关（F7 即时切换）：不存在→创建并启用；已启用→禁用；已禁用→启用。
+    /// <paramref name="enabled"/> 回传**切换后实际是否处于封网态**，供 UI 直接显示提示 ——
+    /// 以前调用方自己再查一次状态，与这里的判断口径不一致时会显示反（实测“永远显示已解除”）。</summary>
+    public bool Toggle(out bool enabled)
     {
         lock (_lock)
         {
+            if (_shuttingDown) { _log.Warn("正在退出，已拒绝封网操作", "Firewall"); enabled = false; return false; }
             if (!_lastExists && !ExistsCore())
             {
                 _log.Info("封存档：规则不存在 → 创建并启用", "Firewall");
-                if (!AddRule("")) return false;
-                return Enable();
+                bool created = AddRule() && Enable();
+                enabled = created;
+                return created;
             }
             bool on = _lastEnabled ?? EnabledCore() ?? false;
             if (on)
             {
                 _log.Info("封存档：当前启用 → 禁用（恢复联网）", "Firewall");
-                return Disable();
+                bool ok = Disable();
+                enabled = ok && !on;      // 禁用成功 ⇒ 现在是“未封”
+                return ok;
             }
             _log.Info("封存档：当前禁用 → 启用（阻断云存档）", "Firewall");
-            return Enable();
+            bool en = Enable();
+            enabled = en && !on;
+            return en;
         }
     }
 
-    /// <summary>安全清理：确保退出时两条规则都处于禁用态，绝不把用户留在断网状态。</summary>
-    public void SafeCleanup()
+    /// <summary>
+    /// 安全清理：确保退出时封网规则处于禁用态，绝不把用户留在断网状态。
+    /// 返回“是否**确认**规则已关闭”。
+    /// 以前这里只在“规则存在且状态查询恰好成功”时才动手，查询失败（netsh 返回非 0）就**静默跳过**，
+    /// 而调用方的退出日志照样写“（防火墙已恢复）”—— 实测遗留过启用态规则，
+    /// 症状正是游戏一直“无法从 Rockstar 云服务器下载您保存的数据”。
+    /// </summary>
+    public bool SafeCleanup()
     {
+        _shuttingDown = true;   // 之后任何 Enable/Toggle/Arm 都被拒绝：否则仍在跑的班次会把规则又打开
         try
         {
             lock (_lock)
             {
-                foreach (var name in new[] { RuleName, BlockAllRuleName })
+                // 无条件发一次关闭命令（没有匹配规则时 netsh 也只是退 0，无副作用），再回读确认
+                var (ok, _, se) = Netsh("set rule name=" + RuleName + " new enable=no");
+                var state = EnabledCoreOf(RuleName);
+                if (state == false)
                 {
-                    if (RuleExistsCore(name) && EnabledCoreOf(name) == true)
-                    {
-                        Netsh("set rule name=" + name + " new enable=no");
-                        if (name == RuleName) _lastEnabled = false; else _lastBlockAllEnabled = false;
-                        _log.Okay("退出清理：已禁用防火墙规则 " + name, "Firewall");
-                    }
+                    _lastEnabled = false;
+                    _log.Okay("退出清理：已确认封网规则关闭（" + RuleName + "）", "Firewall");
+                    return true;
                 }
+                if (state == true)
+                {
+                    _log.Error("退出清理失败：规则仍处于封网状态，请手动执行 netsh advfirewall firewall set rule name="
+                        + RuleName + " new enable=no ：" + se, "Firewall");
+                    return false;
+                }
+                _log.Warn(ok
+                    ? "退出清理：已发出关闭命令，但状态查询失败、无法确认（" + RuleName + "）"
+                    : "退出清理失败：关闭命令未成功（" + RuleName + "）：" + se, "Firewall");
+                return false;
             }
         }
         catch (Exception e)
         {
             _log.Error("退出清理防火墙失败: " + e.Message, "Firewall");
+            return false;
         }
     }
-
-    // ================= 完全断网（故意掉线）=================
-
-    /// <summary>完全断网是否已启用。</summary>
-    public bool? BlockAllEnabled() { lock (_lock) return EnabledCoreOf(BlockAllRuleName); }
-
-    public bool BlockAllExists() { lock (_lock) return RuleExistsCore(BlockAllRuleName); }
 
     /// <summary>
-    /// 完全断网（故意掉线）：另建一条规则封**全部出站**（TCP+UDP，或 protocol=any），
-    /// 与“封存档”完全独立——两条规则可以同时开、分别关。
+    /// 启动自愈：进程被任务管理器强杀/崩溃时 SafeCleanup 跑不到，规则会**留在启用态**，
+    /// 症状就是游戏反复“无法从 Rockstar 云服务器下载您保存的数据”。
+    /// 每次启动先把它恢复掉，并清掉旧版“完全断网”功能留下的规则。
     /// </summary>
-    public bool EnableBlockAll()
+    public void HealLeftovers()
     {
-        lock (_lock)
+        try
         {
-            string what = _settings.Firewall.BlockAllUseProtocols ? "TCP+UDP 全部出站" : "全部出站(any)";
-            if (_lastBlockAllEnabled == true) return true;
-            // 快路径：规则已在 → 只翻开关（全封要能在“检测到加速器”时几十毫秒内落下）
-            if (_lastBlockAllExists || RuleExistsCore(BlockAllRuleName))
+            lock (_lock)
             {
-                var (sok, _, sse) = Netsh("set rule name=" + BlockAllRuleName + " new enable=yes");
-                if (sok)
+                if (RuleExistsCore(RuleName) && EnabledCoreOf(RuleName) == true)
                 {
-                    _lastBlockAllExists = true; _lastBlockAllEnabled = true;
-                    _log.Okay("完全断网已启用（故意掉线，" + what + "）", "Firewall");
-                    return true;
+                    // 必须看返回值：非管理员时 netsh 会失败（“需要提升”），以前这里不看结果，
+                    // 于是规则照样开着、游戏照样“无法下载云存档”，日志却写着“已恢复联网”。
+                    var (ok, _, se) = Netsh("set rule name=" + RuleName + " new enable=no");
+                    if (ok)
+                    {
+                        _lastExists = true; _lastEnabled = false;
+                        _log.Warn("启动自愈：上次退出时封网规则仍在启用态，已恢复联网（" + RuleName + "）", "Firewall");
+                    }
+                    else _log.Error("启动自愈失败：封网规则仍启用（游戏将无法下载云存档），请以管理员运行本程序或手动执行 "
+                        + "netsh advfirewall firewall set rule name=" + RuleName + " new enable=no ：" + se, "Firewall");
                 }
-                _log.Warn("快路径启用失败，回退重建完全断网规则: " + sse, "Firewall");
+                if (RuleExistsCore(LegacyBlockAllRuleName))
+                {
+                    var (ok, _, se) = Netsh("delete rule name=" + LegacyBlockAllRuleName);
+                    if (ok) _log.Okay("启动清理：已删除旧版“完全断网”残留规则", "Firewall");
+                    else _log.Error("启动清理：删除旧版规则失败 " + se, "Firewall");
+                }
             }
-            if (RuleExistsCore(BlockAllRuleName)) Netsh("delete rule name=" + BlockAllRuleName);
-            bool ok;
-            if (_settings.Firewall.BlockAllUseProtocols)
-            {
-                var (ok1, _, se1) = Netsh("add rule name=" + BlockAllRuleName + " dir=out action=block protocol=TCP enable=yes");
-                var (ok2, _, se2) = Netsh("add rule name=" + BlockAllRuleName + " dir=out action=block protocol=UDP enable=yes");
-                ok = ok1 && ok2;
-                if (!ok) { _log.Error("完全断网启用失败: " + (ok1 ? se2 : se1), "Firewall"); return false; }
-            }
-            else
-            {
-                var (okA, _, seA) = Netsh("add rule name=" + BlockAllRuleName + " dir=out action=block protocol=any enable=yes");
-                ok = okA;
-                if (!ok) { _log.Error("完全断网启用失败: " + seA, "Firewall"); return false; }
-            }
-            if (ok) { _lastBlockAllExists = true; _lastBlockAllEnabled = true; _log.Okay("完全断网已启用（故意掉线，" + what + "）", "Firewall"); }
-            return ok;
         }
+        catch (Exception e) { _log.Error("启动自愈失败: " + e.Message, "Firewall"); }
     }
 
-    public bool DisableBlockAll()
-    {
-        lock (_lock)
-        {
-            if (_lastBlockAllEnabled == false) { _log.Info("完全断网已禁用，跳过", "Firewall"); return true; }
-            if (!_lastBlockAllExists && !RuleExistsCore(BlockAllRuleName)) { _log.Warn("完全断网规则不存在", "Firewall"); return false; }
-            var (ok, _, se) = Netsh("set rule name=" + BlockAllRuleName + " new enable=no");
-            if (ok) { _lastBlockAllExists = true; _lastBlockAllEnabled = false; _log.Okay("完全断网已解除（网络恢复）", "Firewall"); }
-            else _log.Error("完全断网解除失败: " + se, "Firewall");
-            return ok;
-        }
-    }
-
-    /// <summary>完全断网开关（F8 即时切换）。</summary>
-    public bool ToggleBlockAll()
-        => BlockAllEnabled() == true ? DisableBlockAll() : EnableBlockAll();
-
-    /// <summary>创建“完全断网”规则（默认禁用，等 F8 或按钮启用）。</summary>
-    public bool AddBlockAllRule()
-    {
-        lock (_lock)
-        {
-            if (RuleExistsCore(BlockAllRuleName)) Netsh("delete rule name=" + BlockAllRuleName);
-            bool ok;
-            if (_settings.Firewall.BlockAllUseProtocols)
-            {
-                var (a, _, ea) = Netsh("add rule name=" + BlockAllRuleName + " dir=out action=block protocol=TCP enable=no");
-                var (b, _, eb) = Netsh("add rule name=" + BlockAllRuleName + " dir=out action=block protocol=UDP enable=no");
-                ok = a && b;
-                if (!ok) { _log.Error("添加完全断网规则失败: " + (a ? eb : ea), "Firewall"); return false; }
-            }
-            else
-            {
-                var (a, _, ea) = Netsh("add rule name=" + BlockAllRuleName + " dir=out action=block protocol=any enable=no");
-                ok = a;
-                if (!ok) { _log.Error("添加完全断网规则失败: " + ea, "Firewall"); return false; }
-            }
-            _lastBlockAllExists = true; _lastBlockAllEnabled = false;
-            _log.Okay("完全断网规则已添加（默认禁用）", "Firewall");
-            return true;
-        }
-    }
-
-    /// <summary>一键添加两条规则（都是禁用态，之后用 F7/F8 开）。</summary>
-    public bool AddAllRules()
-    {
-        bool a = AddRule("");
-        bool b = AddBlockAllRule();
-        _log.Info("添加全部规则: 封存档=" + (a ? "OK" : "失败") + " 完全断网=" + (b ? "OK" : "失败"), "Firewall");
-        return a && b;
-    }
-
-    /// <summary>一键删除两条规则（若处于封网状态会先恢复，避免残留断网）。</summary>
-    public bool DeleteAllRules()
+    /// <summary>一键删除规则（若处于封网状态会先恢复，避免残留断网），并清掉旧版功能残留。</summary>
+    public bool DeleteRules()
     {
         bool a = DeleteRule();
-        bool b = DeleteBlockAllRule();
-        _log.Info("删除全部规则: 封存档=" + (a ? "OK" : "失败") + " 完全断网=" + (b ? "OK" : "失败"), "Firewall");
-        return a && b;
-    }
-
-    public bool DeleteBlockAllRule()
-    {
+        bool b = true;
         lock (_lock)
         {
-            if (!RuleExistsCore(BlockAllRuleName)) return true;
-            var (ok, _, se) = Netsh("delete rule name=" + BlockAllRuleName);
-            if (ok)
+            if (RuleExistsCore(LegacyBlockAllRuleName))
             {
-                _lastBlockAllExists = false; _lastBlockAllEnabled = false;
-                _log.Okay("完全断网规则已删除", "Firewall");
+                var (ok, _, se) = Netsh("delete rule name=" + LegacyBlockAllRuleName);
+                b = ok;
+                if (!ok) _log.Error("删除旧版“完全断网”规则失败: " + se, "Firewall");
             }
-            else _log.Error("完全断网规则删除失败: " + se, "Firewall");
-            return ok;
         }
+        _log.Info("删除规则: 封存档=" + (a ? "OK" : "失败") + " 旧版残留=" + (b ? "OK" : "失败"), "Firewall");
+        return a && b;
     }
 
     /// <summary>规则是否存在：netsh 找不到时退出码非 0，输出里也会写“没有匹配的规则 / No rules match”。</summary>
@@ -439,18 +424,24 @@ public sealed class FirewallController
         return true;
     }
 
-    /// <summary>启用状态查询（中英双语输出都认）：Enabled: Yes/No 或 已启用: 是/否。</summary>
+    /// <summary>
+    /// 启用状态查询（中英双语）：同名规则可能有多条 —— **全部为“是”才算启用**，任一条为“否”即视为禁用。
+    /// （旧版只读第一行，多条同名规则状态不一致时会读错，曾导致 F8 开关变成永久空操作。）
+    /// </summary>
     private bool? EnabledCoreOf(string name)
     {
         var (ok, stdout, _) = Netsh("show rule name=" + name + " verbose");
         if (!ok) return null;
+        bool? all = null;
         foreach (var line in stdout.Split('\n'))
         {
             var t = line.Trim();
             if (!t.StartsWith("Enabled:", StringComparison.OrdinalIgnoreCase) && !t.StartsWith("已启用:")) continue;
-            if (t.Contains("Yes", StringComparison.OrdinalIgnoreCase) || t.Contains("是")) return true;
-            if (t.Contains("No", StringComparison.OrdinalIgnoreCase) || t.Contains("否")) return false;
+            bool yes = t.Contains("Yes", StringComparison.OrdinalIgnoreCase) || t.Contains("是");
+            bool no = t.Contains("No", StringComparison.OrdinalIgnoreCase) || t.Contains("否");
+            if (!yes && !no) continue;
+            all = all is null ? yes : (all.Value && yes);
         }
-        return null;
+        return all;
     }
 }

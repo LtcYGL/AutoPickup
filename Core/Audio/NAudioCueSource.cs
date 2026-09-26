@@ -25,6 +25,7 @@ public sealed class NAudioCueSource : IAudioCueSource
     private volatile float _peak;
     private long _lastDataTs;
     private long _startTs;
+    private volatile bool _warned;
     private System.Threading.Timer? _watch;
 
     public string Name { get; private set; } = "回环RMS(默认输出)";
@@ -43,7 +44,7 @@ public sealed class NAudioCueSource : IAudioCueSource
             var dev = PickDevice(out string candidates);
             if (!string.IsNullOrEmpty(candidates)) _log.Info("可用的回环输出设备：" + candidates, "Audio");
             _cap = dev is null ? new WasapiLoopbackCapture() : new WasapiLoopbackCapture(dev);
-            DeviceName = dev?.FriendlyName ?? "(系统默认)";
+            DeviceName = dev?.FriendlyName ?? DefaultDeviceName();
             _cap.DataAvailable += OnData;
             IsAvailable = true;
             _log.Okay("NAudio 回环捕获就绪 → " + DeviceName + "（格式 " + _cap.WaveFormat + "）", "Audio");
@@ -64,9 +65,9 @@ public sealed class NAudioCueSource : IAudioCueSource
             var all = en.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active).ToList();
             candidates = string.Join(" / ", all.Select((d, i) => "#" + i + " " + d.FriendlyName));
             string want = (_a.CaptureDevice ?? "").Trim();
-            if (want.Length == 0)
+            if (want.Length == 0 || want == "(系统默认)" || want == "系统默认")
             {
-                // 没显式配置：仍用系统默认，但把清单打出来供选择
+                // 没显式配置（或参数页下拉选了“(系统默认)”）：用系统默认，但把清单打出来供选择
                 return null;
             }
             // 支持 "#3" 或 "#3 名字..."（取 # 后到第一个空格之间的数字当序号）
@@ -96,6 +97,22 @@ public sealed class NAudioCueSource : IAudioCueSource
             _log.Warn("枚举音频设备失败: " + e.Message, "Audio");
             return null;
         }
+    }
+
+    /// <summary>
+    /// 默认设备的**实际名字**。以前这里直接写“(系统默认)”，于是日志只留下
+    /// “回环捕获就绪 → (系统默认)（44100Hz）”—— 而本机有 3 台设备都是 44100Hz，
+    /// 一旦出现“静音基线恒为 0.0%”就根本看不出到底绑了哪台（绑错设备正是本项目最常见的音频故障）。
+    /// </summary>
+    private static string DefaultDeviceName()
+    {
+        try
+        {
+            using var en = new MMDeviceEnumerator();
+            var d = en.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            return d.FriendlyName + " (系统默认)";
+        }
+        catch { return "(系统默认，名字查询失败)"; }
     }
 
     private void OnData(object? sender, WaveInEventArgs e)
@@ -136,14 +153,19 @@ public sealed class NAudioCueSource : IAudioCueSource
             _startTs = Environment.TickCount64;
             _lastDataTs = _startTs;
             _log.Okay("音频回环采集已开始 → " + DeviceName, "Audio");
-            // 看门狗：启动后 6s 仍无任何回调，通常说明选错了设备（完全不发声的设备不给回调）
+            // 看门狗：启动后 6s 仍无任何回调，通常说明选错了设备（完全不发声的设备不给回调）。
+            // 只报一次：以前每 10 秒重复刷同一条 Warn，设备真不对时会把日志刷满。
             _watch = new System.Threading.Timer(_ =>
             {
                 try
                 {
+                    if (_warned) return;
                     if (Environment.TickCount64 - _lastDataTs > 6000)
-                        _log.Warn("音频回环 6 秒无任何数据 → 可能选错了输出设备（当前：" + DeviceName
-                            + "）；请在参数页“音频·捕获设备”里换一个，或用 --audio-devices 查看清单", "Audio");
+                    {
+                        _warned = true;
+                        _log.Warn("音频回环 6 秒没有任何数据 → 可能选错了输出设备（当前：" + DeviceName
+                            + "）；请在参数页「3 音频 · 捕获设备」的下拉里改选对应设备", "Audio");
+                    }
                 }
                 catch { }
             }, null, 7000, 10000);

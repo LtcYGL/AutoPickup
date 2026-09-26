@@ -51,7 +51,6 @@ public sealed class TemplateBank
             bmp.UnlockBits(data);
             // argb 内存序为 BGRA
             var gray = Imaging.BgraToGray(argb, w, h);
-            var rel = Path.GetRelativePath(Path.GetDirectoryName(file)!, file);
             var group = InferGroup(Path.GetFileName(file));
             var name = Path.GetFileNameWithoutExtension(file);
             return new TemplateDef

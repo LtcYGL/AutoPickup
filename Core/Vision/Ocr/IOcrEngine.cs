@@ -15,12 +15,9 @@ public interface IOcrEngine
     string? RecognizeGray(byte[] gray, int width, int height)
     {
         if (gray is null || width <= 0 || height <= 0) return null;
-        var bgra = new byte[width * height * 4];
-        for (int i = 0, j = 0; i < gray.Length && j < bgra.Length; i++, j += 4)
-        {
-            byte v = gray[i];
-            bgra[j] = v; bgra[j + 1] = v; bgra[j + 2] = v; bgra[j + 3] = 255;
-        }
-        return Recognize(bgra, width, height);
+        int n = width * height;
+        if (gray.Length < n) return null;
+        // 展开逻辑统一在 Imaging.GrayToBgra（原来接口默认实现与 WindowsOcrEngine 各抄了一份）
+        return Recognize(Imaging.GrayToBgra(n == gray.Length ? gray : gray[..n]), width, height);
     }
 }

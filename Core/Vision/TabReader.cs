@@ -129,7 +129,33 @@ public sealed class TabReader
         var tab = bestBand.b;
         if (tab.count == 0 || bestBand.score < 3)
         {
-            return null;
+            // 原来是直接 return null。但“score>=3”要求整帧 OCR 已经把 tab 名读成完整词——
+            // 切页/动画帧里这些小字常被读成单字，score 掉到 0~2，于是就此 null，
+            // 而下面专门做“单字重组 tab 名”的兜底逻辑反而永远用不上。
+            // 兜底①：几何上像 tab 条的簇（顶部、够宽、词数够）就直接用起来，名字交给重组逻辑。
+            var relaxed = bands
+                .Where(b => b.count >= 4 && (b.xMax - b.xMin) > 0.35 * frame.Width
+                            && b.yMid <= 0.30 * frame.Height)
+                .OrderByDescending(b => b.count).ThenByDescending(b => b.xMax - b.xMin)
+                .FirstOrDefault();
+            if (relaxed.count > 0)
+            {
+                tab = relaxed;
+                _log.Info("tab 条带按几何兜底 y " + tab.y0 + ".." + tab.y1 + "（tab 名命中 " + bestBand.score + "）", "Detail");
+            }
+            else
+            {
+                // 兜底②：连簇都没有 → 用参数页配置的 tab 条带重读一次；按 tab条倍率，1x 读不出再补一次 2x
+                int cy0 = Math.Max(0, (int)Math.Round(frame.Height * _settings.Vision.TabStripTopPercent / 100.0));
+                int cy1 = Math.Min(frame.Height - 1, (int)Math.Round(frame.Height * _settings.Vision.TabStripBottomPercent / 100.0));
+                if (cy1 - cy0 < 8 * k) return null;
+                var cw = OcrStrip(frame, cy0, cy1);
+                if (cw.Count == 0 && _settings.Vision.TabUpscale < 2) cw = OcrStrip(frame, cy0, cy1, 2.0);
+                if (cw.Count == 0) return null;
+                words = cw;
+                tab = (cy0, cy1, cw.Min(w => w.X1), cw.Max(w => w.X2), cw.Count, (cy0 + cy1) / 2);
+                _log.Info("tab 自适应失败 → 配置条带 y " + cy0 + ".." + cy1 + " 重读，词数 " + cw.Count, "Detail");
+            }
         }
 
         // 条带内词改用 2x 放大重读：整帧原生 OCR 会把选中 tab 的小字整字漏读
@@ -248,7 +274,7 @@ public sealed class TabReader
 
     /// <summary>tab 条带识别：按“目标字高”等比缩放到工作像素后灰度直送 OCR，
     /// 词框坐标再按同一系数还原回原帧（EdgeBrightness 等按原帧取样）。</summary>
-    private IReadOnlyList<OcrWord> OcrStrip(Frame frame, int y0, int y1)
+    private IReadOnlyList<OcrWord> OcrStrip(Frame frame, int y0, int y1, double? scaleOverride = null)
     {
         int w = frame.Width;
         int yt = Math.Max(0, y0);
@@ -260,8 +286,10 @@ public sealed class TabReader
         for (int y = 0; y < h; y++)
             Array.Copy(full, (yt + y) * frame.Width, crop, y * w, w);
         var v = _settings.Vision;
-        // 站点固定倍率（tab 条实测原生 1x 最佳）
-        var prep = OcrPrep.ForRegionSite(crop, w, h, "tab", v);
+        // 默认走站点固定倍率（tab条倍率）；兜底路径可显式指定倍率（1x 读不出小字时补 2x）
+        var prep = scaleOverride is double so && so > 0
+            ? OcrPrep.Resize(crop, w, h, so, v)
+            : OcrPrep.ForRegionSite(crop, w, h, "tab", v);
         var words = _ocr.RecognizeWords(Imaging.GrayToBgra(prep.Gray), prep.Width, prep.Height);
         if (v.OcrLogInput)
             _log.Info(string.Format("OCR[tab条] 裁剪 {0}x{1} → {2} k={3:F2} 词数 {4}",

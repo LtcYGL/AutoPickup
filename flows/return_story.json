@@ -81,6 +81,7 @@
       "expect": [
         "ctx:selectedtab like 在线"
       ],
+      "timeoutSec": 15,
       "retry": {
         "max": 3,
         "intervalMs": 800

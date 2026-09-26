@@ -46,7 +46,7 @@ public sealed class LiveFlowHost : IFlowHost
         if (Passive) { _log.Info("[影子] 跳过手势 " + dir, "Flow"); return; }
         var d = dir.Equals("down", StringComparison.OrdinalIgnoreCase) ? QuickLookDir.Down : QuickLookDir.Up;
         bool ok = _input.TryQuickLook(d, _settings.QuickSwitch.WheelOpenMs, _settings.QuickSwitch.LookHoldMs, _settings.QuickSwitch.StickMagnitude);
-        if (!ok) _log.Warn("输入层不支持轮盘手势", "Flow");
+        if (!ok) _log.Warn("轮盘手势没发出去（输入层不可用，或参数页「6 快捷切换 · 推杆幅度」为 0）", "Flow");
     }
 
     public void SleepMs(int ms) { if (ms > 0) Thread.Sleep(ms); }
@@ -62,19 +62,32 @@ public sealed class LiveFlowHost : IFlowHost
         if (Passive) { _log.Info("[影子] 跳过等待下云 cue", "Flow"); return true; }
         if (_audio is null || !_audio.IsAvailable)
         {
-            _log.Warn("音频 cue 不可用（无 GTA 音频会话）", "Flow");
+            // 老文案一律说“无 GTA 音频会话”，但最常见的其实是参数页把音频 cue 关了 / 选错设备
+            _log.Warn("音频 cue 不可用：" + (_audio?.Name ?? "未初始化")
+                + "（检查参数页「3 音频」的“启用音频cue”与“捕获设备”；命令行 --audio-devices 可看设备清单）", "Flow");
             return false;
         }
+        // 预置封网规则：等 cue 这段通常 1~3 分钟，正好把规则建好并保持禁用，cue 一响只剩一次开关。
+        // 不预置的话，慢路径的 delete+add+域名解析（0.5~1s）、甚至快路径探测失败后的回退
+        // （实测 8.8s / 10.7s）会正好压在“cue→封网”这段关键时间上。
+        if (_settings.Shift.UseFirewall) _fw.Arm();
         _log.Info("等待“下云”声音 cue（安静→响亮，最长 " + timeoutSec + "s）…", "Flow");
         var det = new AutoPickup.Core.Audio.CloudCueDetector(_log, _settings.Audio);
         det.Begin();
         int step = Math.Max(20, _settings.Audio.SampleIntervalMs);   // 采样间隔（参数页可调）
         int waited = 0, total = timeoutSec * 1000;
+        int beat = 15000;   // 心跳：让“几分钟没动静”看得出是在等声音，而不是卡死
         while (waited < total)
         {
             if (det.Feed(_audio.CurrentPeak)) return true;
             Thread.Sleep(step);
             waited += step;
+            if (waited >= beat)
+            {
+                beat += 15000;
+                _log.Info("  仍在下云 cue 等待中 +" + (waited / 1000) + "s（当前音量 "
+                    + (_audio.CurrentPeak * 100).ToString("F0") + "%）", "Flow");
+            }
         }
         _log.Warn("等待下云声音超时(" + timeoutSec + "s)", "Flow");
         return false;

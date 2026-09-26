@@ -147,7 +147,7 @@ public sealed class OverlayForm : Form
     /// <summary>左上角短暂提示（F11 封存档/恢复）。</summary>
     public void ShowToast(string text)
     {
-        if (!_overlay.Enabled || !_overlay.ToastOnBlockSave) return;
+        if (!_overlay.Enabled || !_overlay.ToastOnAction) return;
         Ui(() =>
         {
             _toastText = text;

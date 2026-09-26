@@ -1016,11 +1016,7 @@ internal static class Program
         switch (op.ToLowerInvariant())
         {
             case "add":
-                var path = rt.Window.IsProcessRunning() ? Core.Native.Win32.FindWindowW("sgaWindow", "Grand Theft Auto V") : IntPtr.Zero;
-                // 规则需程序路径：由 Firewall.AddRule 内部解析进程路径失败时提示
-                _ = path;
-                bool added = rt.Firewall.AddRule(FindGtaPath());
-                NativeConsole.Ln("fw add => " + (added ? "OK" : "FAIL"));
+                NativeConsole.Ln("fw add => " + (rt.Firewall.AddRule() ? "OK" : "FAIL"));
                 break;
             case "enable":
                 NativeConsole.Ln("fw enable => " + (rt.Firewall.Enable() ? "OK" : "FAIL"));
@@ -1039,19 +1035,6 @@ internal static class Program
                 NativeConsole.Ln("用法: --fw add|enable|disable|delete|status");
                 break;
         }
-    }
-
-    private static string FindGtaPath()
-    {
-        try
-        {
-            foreach (var proc in System.Diagnostics.Process.GetProcessesByName("GTA5_Enhanced"))
-            {
-                if (!string.IsNullOrEmpty(proc.MainModule?.FileName)) return proc.MainModule.FileName;
-            }
-        }
-        catch { }
-        return "";
     }
 
     /// <summary>词级 OCR 诊断：--words &lt;png/jpg&gt; 打印词数与样本。</summary>

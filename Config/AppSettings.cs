@@ -34,12 +34,6 @@ public sealed class AppSettings
         [Category("2 防火墙")] [DisplayName("规则名")] [Description("netsh 规则名，默认 AutoPickupBlock；封存档热键用的就是它")]
         public string RuleName { get; set; } = "AutoPickupBlock";
 
-        [Category("2 防火墙")] [DisplayName("完全断网规则名")] [Description("“完全断网（故意掉线）”用的第二条规则，独立于封存档；默认 AutoPickupBlockAll")]
-        public string BlockAllRuleName { get; set; } = "AutoPickupBlockAll";
-
-        [Category("2 防火墙")] [DisplayName("完全断网规则按TCP/UDP拆两条")] [Description("只决定“完全断网”这条规则怎么写，本身不开关完全断网（开关在流程页[完全断网 开/关]按钮或 F8）：勾选=TCP、UDP 各一条(兼容性最好，默认)；不勾=protocol=any 一条")]
-        public bool BlockAllUseProtocols { get; set; } = true;
-
         [Category("2 防火墙")] [DisplayName("封锁域名")] [Description("存档服域名，启用时现解析全部 IPv4（云存档可能换 CDN IP）")]
         public List<string> BlockDomains { get; set; } = new() { "cs-gta5-prod.ros.rockstargames.com" };
 
@@ -58,7 +52,8 @@ public sealed class AppSettings
         [Category("3 音频")] [DisplayName("启用音频cue")] [Description("回环音量判定“下云”声音，默认开")]
         public bool Enable { get; set; } = true;
 
-        [Category("3 音频")] [DisplayName("捕获设备")] [Description("留空=系统默认输出；也可填设备名片段或 #0/#1 序号（用 --audio-devices 查看清单）。默认构造只在启动那刻绑定默认设备，之后换设备不跟随")]
+        [Category("3 音频")] [DisplayName("捕获设备")] [Description("下拉即当前活动的输出设备（实时枚举，含“(系统默认)”）；也可手打设备名片段。注意：只在程序启动那刻绑定，之后换默认设备不跟随")]
+        [TypeConverter(typeof(CaptureDeviceConverter))]
         public string CaptureDevice { get; set; } = "";
 
         [Category("3 音频")] [DisplayName("采样间隔(ms)")] [Description("音量采样间隔，默认 100ms；越小越灵敏、开销略增")]
@@ -76,13 +71,10 @@ public sealed class AppSettings
         [Category("4 识别·工作像素")] [DisplayName("整帧工作像素上限(M)")] [Description("整帧兜底识别前按同一系数缩到该像素量（保持长宽比、只缩不放），默认 0.98M≈1280x768；4K 用它换速度")]
         public double OcrWorkPixelsM { get; set; } = 0.98;
 
-        [Category("4 识别·工作像素")] [DisplayName("默认区域倍率")] [Description("未单独指定的区域的默认整数倍放大，默认 2")]
-        public double RegionUpscale { get; set; } = 2.0;
-
         [Category("4 识别·工作像素")] [DisplayName("左下提示倍率")] [Description("左下 toast 小字放大倍率；实测 2 能把“保存失败”读全，3 反而变差，默认 2")]
         public double ToastUpscale { get; set; } = 2.0;
 
-        [Category("4 识别·工作像素")] [DisplayName("tab条倍率")] [Description("顶部 tab 条放大倍率；实测原生 1x 已最佳，默认 1（不放大）")]
+        [Category("4 识别·工作像素")] [DisplayName("tab条倍率")] [Description("tab 条【裁图重读】的放大倍率（自适应定位失败兜底、以及条带补充读取时用）；默认 1=不放大，读不到条带时可试 2")]
         public double TabUpscale { get; set; } = 1.0;
 
         [Category("4 识别·工作像素")] [DisplayName("中央弹窗倍率")] [Description("中央弹窗放大倍率；实测 2 更稳（原生也能读），默认 2")]
@@ -90,9 +82,6 @@ public sealed class AppSettings
 
         [Category("4 识别·工作像素")] [DisplayName("焦点行倍率")] [Description("列表焦点行放大倍率；行裁很小需要更高倍，默认 3")]
         public double FocusRowUpscale { get; set; } = 3.0;
-
-        [Category("4 识别·工作像素")] [DisplayName("列表倍率")] [Description("列表/其他区域放大倍率，默认 2")]
-        public double ListUpscale { get; set; } = 2.0;
 
         [Category("4 识别·工作像素")] [DisplayName("用双三次重采样")] [Description("勾选=双三次(质量更好，实测能把“保存失败”读全)；不勾=最近邻(快)。默认勾选")]
         public bool OcrUseBicubic { get; set; } = true;
@@ -144,10 +133,10 @@ public sealed class AppSettings
         [Category("4 识别·列表")] [DisplayName("焦点行白阈值")] [Description("选中行白带亮度门限，默认 140")]
         public double RowWhiteThreshold { get; set; } = 140;
 
-        [Category("4 识别·tab条")] [DisplayName("tab条上%(高)")] [Description("顶部标签条上边界，占画面高度百分比；默认 12.0%（768 下的 y92）")]
+        [Category("4 识别·tab条")] [DisplayName("tab条上%(高)")] [Description("tab 条【兜底】区域上边界（占画面高度百分比）：正常走自适应定位（从整帧词里找 tab 行），只有定位失败时才用这个条带，默认 12.0%（768 下的 y92）")]
         public double TabStripTopPercent { get; set; } = 12.0;
 
-        [Category("4 识别·tab条")] [DisplayName("tab条下%(高)")] [Description("顶部标签条下边界，占画面高度百分比；默认 21.9%（768 下的 y168）")]
+        [Category("4 识别·tab条")] [DisplayName("tab条下%(高)")] [Description("tab 条【兜底】区域下边界，与上一项配对；默认 21.9%（768 下的 y168）")]
         public double TabStripBottomPercent { get; set; } = 21.9;
 
         [Category("4 识别·tab条")] [DisplayName("tab白块阈值")] [Description("选中 tab 纯白块亮度门限，默认 190")]
@@ -260,8 +249,8 @@ public sealed class AppSettings
         [Category("9 覆盖层")] [DisplayName("区域文字标签")] [Description("是否在区域框旁标注中文名，默认开")]
         public bool ShowLabels { get; set; } = true;
 
-        [Category("9 覆盖层")] [DisplayName("封存档提示")] [Description("F11 封存档/恢复时在游戏左上角短暂显示提示，默认开")]
-        public bool ToastOnBlockSave { get; set; } = true;
+        [Category("9 覆盖层")] [DisplayName("左上角操作提示")] [Description("F7 封存档/解除、F8 结束游戏进程时，在游戏左上角短暂显示提示，默认开")]
+        public bool ToastOnAction { get; set; } = true;
 
         [Category("9 覆盖层")] [DisplayName("提示停留(ms)")] [Description("左上角提示显示时长，默认 2600ms")]
         public int ToastMs { get; set; } = 2600;
@@ -275,7 +264,7 @@ public sealed class AppSettings
 
     public sealed class HotkeySection
     {
-        [Category("8 热键")] [DisplayName("启用全局热键")] [Description("启用后可在任意焦点下用热键即时切换“封存档”，默认开")]
+        [Category("8 热键")] [DisplayName("启用全局热键")] [Description("启用后可在任意焦点下用热键即时切换“封存档”/结束游戏进程，默认开")]
         public bool Enabled { get; set; } = true;
 
         [Category("8 热键")] [DisplayName("封存档热键")] [Description("默认 F7；可填 F1..F12 或字母（.NET Keys 名称），改完点[保存参数]即时生效")]
@@ -284,7 +273,7 @@ public sealed class AppSettings
         [Category("8 热键")] [DisplayName("OCR调参热键")] [Description("默认 F6；全局按下=开/关游戏窗口上的 OCR 区域可视化覆盖层")]
         public string TuneOverlayKey { get; set; } = "F6";
 
-        [Category("8 热键")] [DisplayName("完全断网热键")] [Description("默认 F8；全局按下=完全断网（故意掉线）开/关，独立于封存档")]
-        public string BlockAllKey { get; set; } = "F8";
+        [Category("8 热键")] [DisplayName("结束游戏进程热键")] [Description("默认 F8；全局按下=立即强杀 GTA5 进程（等效“结束进程”，游戏来不及写存档），用于需要硬掉线/中断同步的场合")]
+        public string KillGameKey { get; set; } = "F8";
     }
 }

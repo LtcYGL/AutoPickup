@@ -87,6 +87,9 @@ public sealed class AppRuntime : IDisposable
         Window = new GtaWindowSource(log,
             settings.Game.ProcessName, settings.Game.WindowClass, settings.Game.WindowTitle);
         Firewall = new FirewallController(log, settings);
+        // 启动自愈：上次进程被强杀时 SafeCleanup 跑不到，封网规则会残留在启用态，
+        // 症状是游戏一直“无法从 Rockstar 云服务器下载您保存的数据”。顺手清掉旧版遗留规则。
+        Firewall.HealLeftovers();
         if (settings.Automation.InputMode.Equals("Keyboard", StringComparison.OrdinalIgnoreCase))
         {
             Input = new KeyboardPadInput(log);
@@ -100,11 +103,11 @@ public sealed class AppRuntime : IDisposable
         {
             var src = new NAudioCueSource(log, settings.Audio);
             Audio = src;
-            if (!src.Start()) Audio = new NullAudioCue(log);
+            if (!src.Start()) Audio = new NullAudioCue("回环捕获启动失败（见日志 Audio 行）");
         }
         else
         {
-            Audio = new NullAudioCue(log);
+            Audio = new NullAudioCue("参数页「3 音频 · 启用音频cue」已关闭");
         }
 
         Matcher = new NccMatcher(settings.Vision);

@@ -12,6 +12,7 @@ public sealed class ViGEmPadInput : IInputLayer
     private ushort _mask;
     private int _consecFails;
     private int _reconnects;
+    private bool _warnedUnavailable;
 
     public string Name => "ViGEm 手柄";
     public bool IsAvailable => _pad is { IsReady: true };
@@ -48,9 +49,11 @@ public sealed class ViGEmPadInput : IInputLayer
         try { ok = _pad.Update(_mask); } catch { ok = false; }
         if (ok) { _consecFails = 0; return; }
 
-        // 更新失败（设备被重新枚举/断开）→ 尝试自愈重连一次
+        // 更新失败（设备被重新枚举/断开）→ 尝试自愈重连一次。
+        // 只在“失败链”开头报一次：以前每一次按键都刷一条 Warn，手柄一坏整份日志就被刷满。
         _consecFails++;
-        _log.Warn("ViGEm 上报失败（第 " + _consecFails + " 次，疑似被 Steam/DS4Windows 重枚举），尝试重连…", "Input");
+        if (_consecFails == 1)
+            _log.Warn("ViGEm 上报失败（疑似被 Steam/DS4Windows 重枚举），尝试重连…", "Input");
         try
         {
             if (_pad.TryReconnect())
@@ -60,7 +63,7 @@ public sealed class ViGEmPadInput : IInputLayer
                 _log.Okay("ViGEm 已重连（累计 " + _reconnects + " 次）", "Input");
                 try { _pad.Update(_mask); } catch { }
             }
-            else if (_consecFails >= 3)
+            else if (_consecFails == 3)
             {
                 _log.Error("ViGEm 重连失败且无法恢复——请检查是否被 Steam/DS4Windows 抢占或驱动异常；后续按键将失效", "Input");
             }
@@ -73,7 +76,16 @@ public sealed class ViGEmPadInput : IInputLayer
 
     public void Tap(PadButton button, int holdMs = 150)
     {
-        if (!IsAvailable) { _log.Warn("忽略按键 " + button + "（ViGEm 不可用）", "Input"); return; }
+        if (!IsAvailable)
+        {
+            // 只提示一次：不可用时每个按键都报会让日志彻底淹没
+            if (!_warnedUnavailable)
+            {
+                _warnedUnavailable = true;
+                _log.Warn("ViGEm 虚拟手柄不可用，后续按键全部忽略（检查 ViGEmBus 驱动；本条只提示一次）", "Input");
+            }
+            return;
+        }
         ushort bit = ToMask(button);
         if (bit == 0) return;
         lock (_lock)
@@ -83,15 +95,6 @@ public sealed class ViGEmPadInput : IInputLayer
             Thread.Sleep(Math.Max(20, holdMs));
             _mask &= (ushort)~bit;
             Send();
-        }
-    }
-
-    public void TapTimes(PadButton button, int times, int holdMs = 150, int gapMs = 150)
-    {
-        for (int i = 0; i < times; i++)
-        {
-            Tap(button, holdMs);
-            if (gapMs > 0) Thread.Sleep(gapMs);
         }
     }
 
@@ -117,15 +120,6 @@ public sealed class ViGEmPadInput : IInputLayer
             _log.Info("快捷手势完成：按住↓ " + wheelHoldMs + "ms + 右摇杆" + (dir == QuickLookDir.Up ? "上" : "下")
                 + " " + lookHoldMs + "ms（同帧松开）", "Input");
             return true;
-        }
-    }
-
-    public void Reset()
-    {
-        lock (_lock)
-        {
-            _mask = 0;
-            Send();
         }
     }
 

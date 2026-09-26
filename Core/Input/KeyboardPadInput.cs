@@ -58,15 +58,6 @@ public sealed class KeyboardPadInput : IInputLayer
         }
     }
 
-    public void TapTimes(PadButton button, int times, int holdMs = 150, int gapMs = 150)
-    {
-        for (int i = 0; i < times; i++)
-        {
-            Tap(button, holdMs);
-            if (gapMs > 0) Thread.Sleep(gapMs);
-        }
-    }
-
     /// <summary>PC 快捷切换：按住 Alt 打开角色/模式轮盘，鼠标向 dir 方向甩动后松开 Alt（同刻松）。</summary>
     public bool TryQuickLook(QuickLookDir dir, int wheelHoldMs, int lookHoldMs, double magnitude)
     {
@@ -96,6 +87,5 @@ public sealed class KeyboardPadInput : IInputLayer
         }
     }
 
-    public void Reset() { }
     public void Dispose() { }
 }

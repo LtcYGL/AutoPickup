@@ -3,6 +3,28 @@ using System.Reflection;
 
 namespace AutoPickup.Config;
 
+/// <summary>「3 音频 · 捕获设备」的下拉候选：实时枚举当前活动的输出设备（回环可捕获的目标）。
+/// 不做成“只能选” —— 仍允许手打设备名片段（模糊匹配逻辑不变）。</summary>
+public sealed class CaptureDeviceConverter : StringConverter
+{
+    public const string Default = "(系统默认)";
+
+    public override bool GetStandardValuesSupported(ITypeDescriptorContext? context) => true;
+    public override bool GetStandardValuesExclusive(ITypeDescriptorContext? context) => false;
+
+    public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext? context)
+    {
+        var items = new List<string> { Default };
+        try
+        {
+            foreach (var (idx, name, isDef) in AutoPickup.Core.Audio.NAudioCueSource.ListDevices())
+                items.Add("#" + idx + " " + name + (isDef ? "  [默认]" : ""));
+        }
+        catch { }
+        return new StandardValuesCollection(items);
+    }
+}
+
 /// <summary>参数页用的“扁平视图”：把 AppSettings 各 Section 的所有叶子属性摊平成可直接编辑的行，
 /// 每行沿用原属性上的 Category/DisplayName/Description，PropertyGrid 原生按中文分类显示。
 ///
@@ -106,13 +128,20 @@ public sealed class SettingsView : ICustomTypeDescriptor
         private readonly string _category;
         private readonly string _display;
 
+        /// <summary>基础特性 = 原属性上的全部特性（保住 [TypeConverter] 等，否则下拉/编辑器根本传不到 PropertyGrid）
+        /// + 参数页用的三个显示特性。</summary>
+        private static Attribute[] BuildAttrs(PropertyInfo info, string category, string display, string description)
+        {
+            var attrs = new List<Attribute>();
+            foreach (var a in info.GetCustomAttributes(true)) if (a is Attribute at) attrs.Add(at);
+            attrs.Add(new CategoryAttribute(category));
+            attrs.Add(new DisplayNameAttribute(display));
+            attrs.Add(new DescriptionAttribute(description));
+            return attrs.ToArray();
+        }
+
         public LeafProperty(object target, PropertyInfo info, string name, string category, string display, string description, int order)
-            : base(name, new Attribute[]
-            {
-                new CategoryAttribute(category),
-                new DisplayNameAttribute(display),
-                new DescriptionAttribute(description),
-            })
+            : base(name, BuildAttrs(info, category, display, description))
         {
             _target = target;
             _info = info;

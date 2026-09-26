@@ -79,29 +79,6 @@ public sealed class WindowsOcrEngine : IOcrEngine
     }
 
 
-    /// <summary>灰度直送：1B/像素就地展开成 BGRA8 再交给 WinRT（省一整块 4B 缓冲）。</summary>
-    public string? RecognizeGray(byte[] gray, int width, int height)
-    {
-        if (_engine is null || gray is null || width <= 0 || height <= 0) return null;
-        try
-        {
-            int n = width * height;
-            if (gray.Length < n) return null;
-            var bgra = new byte[n * 4];
-            for (int i = 0, j = 0; i < n; i++, j += 4)
-            {
-                byte v = gray[i];
-                bgra[j] = v; bgra[j + 1] = v; bgra[j + 2] = v; bgra[j + 3] = 255;
-            }
-            return Recognize(bgra, width, height);
-        }
-        catch (Exception e)
-        {
-            _log.Warn("OCR 灰度识别失败: " + e.Message, "Ocr");
-            return null;
-        }
-    }
-
     public IReadOnlyList<OcrWord> RecognizeWords(byte[] bgra, int width, int height)
     {
         var list = new List<OcrWord>();
@@ -139,11 +116,21 @@ public sealed class WindowsOcrEngine : IOcrEngine
     }
 
 
-    private static OcrResult? Wait(IAsyncOperation<OcrResult> op)
+    /// <summary>等待 WinRT 异步 OCR。**带超时**：以前是纯忙等，OCR 一旦卡住会把整个流程冻死
+    /// （步骤超时是在两次观察之间检查的，卡在里面就永远不会超时）。</summary>
+    private OcrResult? Wait(IAsyncOperation<OcrResult> op, int timeoutMs = 20000)
     {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         while (op.Status == AsyncStatus.Started)
+        {
+            if (sw.ElapsedMilliseconds > timeoutMs)
+            {
+                _log.Warn("OCR 超时（>" + timeoutMs + "ms），本帧按“无文本”处理", "Ocr");
+                return null;
+            }
             Thread.Sleep(2);
+        }
         if (op.Status != AsyncStatus.Completed) return null;
-        return op.GetResults();
+        try { return op.GetResults(); } catch { return null; }
     }
 }

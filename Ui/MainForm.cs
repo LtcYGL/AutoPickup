@@ -8,7 +8,7 @@ using AutoPickup.Logging;
 namespace AutoPickup.Ui;
 
 /// <summary>主控窗口 v0.5.1：可拖拽布局 + 内容自适应高度（不再固定/截断）+ 记住窗口尺寸；
-/// 自检=实时灯+只读探测；参数=扁平可编辑；流程=封存档F11+模式切换+班次。</summary>
+/// 自检=实时灯+只读探测；参数=扁平可编辑；流程=封存档F7+模式切换+班次。</summary>
 public sealed class MainForm : Form
 {
     private static readonly Color C_Bg = Color.FromArgb(243, 246, 250);
@@ -22,7 +22,7 @@ public sealed class MainForm : Form
     private static readonly Color LIdle = Color.FromArgb(170, 176, 186);
     private const int HotkeyId = 0x4150;        // 封存档（F7）
     private const int HotkeyIdTune = 0x4151;    // OCR 覆盖层（F6）
-    private const int HotkeyIdBlockAll = 0x4152;// 完全断网（F8）
+    private const int HotkeyIdKill = 0x4152;    // 结束游戏进程
 
     private readonly AppRuntime _rt;
     private readonly RichTextBox _logBox;
@@ -33,12 +33,23 @@ public sealed class MainForm : Form
     private readonly List<Label> _wrapLabels = new();
     private readonly System.Windows.Forms.Timer _lightTimer = new() { Interval = 1000 };
     private readonly string _uiPath;
-    private DateTime _fwCheckedAt = DateTime.MinValue;
-    private bool _fwExists;
-    private bool? _fwEnabled;
-    private DateTime _fwAllCheckedAt = DateTime.MinValue;
-    private bool _fwAllExists;
-    private bool? _fwAllEnabled;
+    /// <summary>状态灯探针快照：抓帧与 netsh 规则查询都在**后台线程**做，UI 线程只渲染。
+    /// 以前这两件事跑在 UI 线程里（netsh 实测 200~316ms/次 × 2），界面与日志每 5 秒卡半秒 —— 就是“输出不是实时的”。</summary>
+    private sealed class LightProbe
+    {
+        public bool Busy;
+        public bool Proc;
+        public bool WinValid;
+        public bool FrameOk;
+        public int FrameW, FrameH;
+        public string FrameMethod = "";
+        public string FrameErr = "";
+        public bool FwExists;
+        public bool? FwEnabled;
+    }
+    private volatile LightProbe _probe = new();
+    private CancellationTokenSource? _probeCts;
+    private volatile bool _fwDirty = true;
     private int _logHeight = 190;
     private bool _logExpanded = true;
     private readonly List<Control> _actionControls = new();
@@ -47,6 +58,9 @@ public sealed class MainForm : Form
     private TabControl _tabs = null!;
     private volatile bool _busy;
     private CancellationTokenSource? _shiftCts;
+    /// <summary>点 X 时若班次仍在跑：先取消并等它安全收尾，收尾完成后才真正关闭。</summary>
+    private bool _closingAfterShift;
+    private System.Windows.Forms.Timer? _closeCapTimer;
     private Button _btnStartShift = null!;
     private Button _btnStopShift = null!;
     private NumericUpDown _rounds = null!;
@@ -143,8 +157,9 @@ public sealed class MainForm : Form
         _rt.Log.EntryAdded += OnLogEntry;
         _lightTimer.Tick += (_, _) => RefreshLights();
         _lightTimer.Start();
+        StartLightProbe();
         LoadUiState();
-        _rt.Log.Hint("热键：F6 显示识别框 · F7 封云存档 · F8 完全断网（故意掉线）。首次使用建议点[使用向导]。");
+        _rt.Log.Hint("热键：F6 显示识别框 · F7 封云存档 · F8 结束游戏进程。首次使用建议点[使用向导]。");
         RefreshLights();
     }
 
@@ -413,12 +428,12 @@ public sealed class MainForm : Form
         var ff = new FlowLayoutPanel { BackColor = C_Panel, Margin = new Padding(2, 2, 2, 2) };
         ff.Controls.AddRange(new Control[]
         {
-            ActionButton("添加全部规则", () => RunOp("防火墙", () => _rt.Firewall.AddAllRules())),
-            ActionButton("删除全部规则", () => RunOp("防火墙", () => _rt.Firewall.DeleteAllRules())),
+            ActionButton("添加规则", () => RunOp("防火墙", () => _rt.Firewall.AddRule())),
+            ActionButton("删除规则", () => RunOp("防火墙", () => _rt.Firewall.DeleteRules())),
             ActionButton("封存档 开/关 (F7)", () => RunOp("封存档(F7)", ToggleBlockSave)),
-            ActionButton("完全断网 开/关 (F8)", () => RunOp("完全断网", OnHotkeyBlockAll)),
+            ActionButton("结束游戏进程 (F8)", () => RunOp("结束进程", OnHotkeyKillGame)),
         });
-        var gFw = StackGroup("联网控制（两条规则独立：封存档=只断云存档，游戏不掉线；完全断网=故意掉线）", ff);
+        var gFw = StackGroup("联网控制（只拦云存档出站，游戏不掉线；[删除规则]同时清掉旧版残留）", ff);
 
         var gTip = StackGroup("说明", Tip(
             "灯色：绿=就绪；黄=需注意（如已封网）；灰=未启用；红=异常。\r\n" +
@@ -693,15 +708,15 @@ public sealed class MainForm : Form
 
     private void ToggleBlockSave()
     {
-        bool ok = _rt.Firewall.Toggle();
-        _rt.Log.Hint("封存档切换 => " + (ok ? "OK" : "FAIL（看日志）"), "UI");
+        bool ok = _rt.Firewall.Toggle(out bool blocked);
+        _rt.Log.Hint("封存档切换 => " + (ok ? (blocked ? "已封网" : "已解除") : "FAIL（看日志）"), "UI");
         if (ok)
         {
-            // 覆盖层左上角提示：让玩家在游戏画面上直接看到“已封/已解除”
-            bool blocked = _rt.Firewall.IsEnabled() == true;
+            // 提示直接用 Toggle 回传的**实际状态**：以前这里再查一次，与 Toggle 的判断口径不一致时
+            // 会显示反（实测“无论开关都只显示已解除” —— 规则被外部删除后 set 假成功那次尤其明显）
             EnsureOverlay()?.ShowToast(blocked ? "封存档：已封（云存档已阻断）" : "封存档：已解除（联网正常）");
         }
-        _fwCheckedAt = DateTime.MinValue;
+        _fwDirty = true;      // 让后台探针立刻重查规则状态
     }
 
     private void StartShift()
@@ -735,6 +750,12 @@ public sealed class MainForm : Form
                     SetShiftStatus("空闲");
                     if (_rt.Settings.Overlay.HideDuringShift) _overlay?.SuspendForTask(false);
                     Release();
+                    // 点 X 时挂起的关闭：收尾完成（防火墙已恢复）后再真正退出
+                    if (_closingAfterShift)
+                    {
+                        _closeCapTimer?.Stop(); _closeCapTimer?.Dispose(); _closeCapTimer = null;
+                        Close();
+                    }
                 });
             }
         });
@@ -820,12 +841,12 @@ public sealed class MainForm : Form
         {
             Win32.UnregisterHotKey(Handle, HotkeyId);
             Win32.UnregisterHotKey(Handle, HotkeyIdTune);
-            Win32.UnregisterHotKey(Handle, HotkeyIdBlockAll);
+            Win32.UnregisterHotKey(Handle, HotkeyIdKill);
             if (!_rt.Settings.Hotkeys.Enabled) return;
             string? used = null;
             RegisterOne(_rt.Settings.Hotkeys.TuneOverlayKey, HotkeyIdTune, "可视OCR条件", ref used);
             RegisterOne(_rt.Settings.Hotkeys.BlockSaveKey, HotkeyId, "封云存档", ref used);
-            RegisterOne(_rt.Settings.Hotkeys.BlockAllKey, HotkeyIdBlockAll, "完全断网(故意掉线)", ref used);
+            RegisterOne(_rt.Settings.Hotkeys.KillGameKey, HotkeyIdKill, "结束游戏进程", ref used);
         }
         catch (Exception ex) { _rt.Log.Warn("热键注册异常: " + ex.Message, "UI"); }
     }
@@ -850,26 +871,40 @@ public sealed class MainForm : Form
             int id = m.WParam.ToInt32();
             if (id == HotkeyId) { OnHotkeyBlockSave(); return; }
             if (id == HotkeyIdTune) { ToggleOverlayTuner(); return; }
-            if (id == HotkeyIdBlockAll) { OnHotkeyBlockAll(); return; }
+            if (id == HotkeyIdKill) { OnHotkeyKillGame(); return; }
         }
         base.WndProc(ref m);
     }
 
-    /// <summary>F8：完全断网（故意掉线）开/关。与封存档独立。</summary>
-    private void OnHotkeyBlockAll()
+    /// <summary>F8：立即结束 GTA5 进程（等效任务管理器“结束进程”，游戏来不及写存档）。</summary>
+    private void OnHotkeyKillGame()
     {
         try
         {
-            bool on = _rt.Firewall.BlockAllEnabled() == true;
+            string name = System.IO.Path.GetFileNameWithoutExtension(_rt.Settings.Game.ProcessName);
+            var procs = System.Diagnostics.Process.GetProcessesByName(name);
+            if (procs.Length == 0)
+            {
+                _rt.Log.Warn("结束游戏进程：" + _rt.Settings.Game.ProcessName + " 未在运行", "UI");
+                _overlay?.ShowToast("游戏未运行");
+                return;
+            }
             if (_busy)
-                _rt.Log.Warn("班次运行中：完全断网会中断游戏会话，请确认后再用（本次仍按你的热键执行）", "UI");
-            _rt.Log.Hint((on ? "关闭" : "打开") + "完全断网（故意掉线）…", "UI");
-            _rt.Firewall.ToggleBlockAll();
-            if (_overlay is not null)
-                _overlay.ShowToast(_rt.Firewall.BlockAllEnabled() == true ? "已完全断网（故意掉线）" : "完全断网已解除");
-            RefreshLights();
+                _rt.Log.Warn("班次运行中：结束游戏进程会中断本轮同步（仍按你的热键执行）", "UI");
+            foreach (var p in procs)
+            {
+                try
+                {
+                    p.Kill();
+                    p.WaitForExit(3000);
+                    _rt.Log.Hint("已结束游戏进程 " + p.ProcessName + "（pid " + p.Id + "）", "UI");
+                }
+                catch (Exception ex) { _rt.Log.Error("结束进程 pid " + p.Id + " 失败: " + ex.Message, "UI"); }
+                finally { p.Dispose(); }
+            }
+            _overlay?.ShowToast("已结束游戏进程");
         }
-        catch (Exception ex) { _rt.Log.Error("完全断网切换失败: " + ex.Message, "UI"); }
+        catch (Exception ex) { _rt.Log.Error("结束游戏进程异常: " + ex.Message, "UI"); }
     }
 
     /// <summary>开/关游戏窗口上的 OCR 区域覆盖层（热键或自检页按钮；点击穿透，不抢焦点）。</summary>
@@ -919,47 +954,74 @@ public sealed class MainForm : Form
         }
     }
 
+    /// <summary>后台探针：每秒更新一次快照（抓帧 + 进程/窗口 + 每 5 秒的 netsh 规则状态）。
+    /// 全部在后台线程上做，UI 线程只读快照渲染 —— 这样日志与按钮不再被 netsh 卡住。</summary>
+    private void StartLightProbe()
+    {
+        _probeCts = new CancellationTokenSource();
+        var ct = _probeCts;
+        Task.Run(() =>
+        {
+            var lastFw = DateTime.MinValue;
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    var prev = _probe;
+                    var p = new LightProbe
+                    {
+                        Busy = _busy,
+                        Proc = _rt.Window.IsProcessRunning(),
+                        WinValid = _rt.Window.IsWindowValid,
+                        FwExists = prev.FwExists,
+                        FwEnabled = prev.FwEnabled,
+                    };
+                    if (!p.Busy && p.WinValid)
+                    {
+                        var f = _rt.Window.CaptureClient();
+                        p.FrameOk = f.IsValid; p.FrameW = f.Width; p.FrameH = f.Height;
+                        p.FrameMethod = _rt.Window.LastMethod;
+                        p.FrameErr = _rt.Window.LastCaptureError ?? "";
+                    }
+                    if (_fwDirty || (DateTime.UtcNow - lastFw).TotalSeconds >= 5)
+                    {
+                        _fwDirty = false;
+                        lastFw = DateTime.UtcNow;
+                        p.FwExists = _rt.Firewall.ExistsQuiet();
+                        p.FwEnabled = _rt.Firewall.IsEnabled();
+                    }
+                    _probe = p;
+                }
+                catch { }
+                Thread.Sleep(1000);
+            }
+        });
+    }
+
     private void RefreshLights()
     {
         if (!IsHandleCreated || _lights.Count == 0) return;
         try
         {
-            bool proc = _rt.Window.IsProcessRunning();
-            bool win = _rt.Window.IsWindowValid;
-            SetLight("游戏进程", proc ? LOk : LBad, proc ? "运行中" : "未运行 GTA5_Enhanced.exe");
-            SetLight("游戏窗口", win ? LOk : LBad, win ? "已找到 sgaWindow" : "未找到窗口");
-            if (_busy) SetLight("抓帧", LIdle, "任务运行中（暂停抓帧检测）");
-            else if (!win) SetLight("抓帧", LBad, "无窗口");
-            else
-            {
-                var f = _rt.Window.CaptureClient();
-                SetLight("抓帧", f.IsValid ? LOk : LBad, f.IsValid ? f.Width + "x" + f.Height + "（" + _rt.Window.LastMethod + "）" : "失败/黑屏（遮挡或全屏独占）");
-            }
+            var p = _probe;
+            SetLight("游戏进程", p.Proc ? LOk : LBad,
+                (p.Proc ? "运行中" : "未运行 " + _rt.Settings.Game.ProcessName)
+                + "　热键 " + _rt.Settings.Hotkeys.KillGameKey + " 结束进程" + (_rt.Settings.Hotkeys.Enabled ? "" : "（热键已禁用）"));
+            SetLight("游戏窗口", p.WinValid ? LOk : LBad, p.WinValid ? "已找到 sgaWindow" : "未找到窗口");
+            if (p.Busy) SetLight("抓帧", LIdle, "任务运行中（暂停抓帧检测）");
+            else if (!p.WinValid) SetLight("抓帧", LBad, "无窗口");
+            else SetLight("抓帧", p.FrameOk ? LOk : LBad, p.FrameOk
+                ? p.FrameW + "x" + p.FrameH + "（" + p.FrameMethod + "）"
+                : "失败/黑屏（遮挡或全屏独占）" + (p.FrameErr.Length > 0 ? "：" + p.FrameErr : ""));
             SetLight("输入层", _rt.Input.IsAvailable ? LOk : LBad, _rt.Input.Name + (_rt.Input.IsAvailable ? "" : "（不可用，需 ViGEmBus）"));
             SetLight("音频cue", _rt.Audio.IsAvailable ? LOk : LIdle,
                 _rt.Audio.Name + (_rt.Audio.IsAvailable ? string.Format("　当前音量 {0:P0}", _rt.Audio.CurrentPeak) : "（未启用）"));
 
-            if ((DateTime.UtcNow - _fwCheckedAt).TotalSeconds > 5)   // 两条规则各自节流，避免 netsh 刷屏
-            {
-                _fwExists = _rt.Firewall.ExistsQuiet();
-                _fwEnabled = _rt.Firewall.IsEnabled();
-                _fwCheckedAt = DateTime.UtcNow;
-            }
-            bool blocked = _fwExists && _fwEnabled == true;
-            SetLight("防火墙", !_fwExists ? LIdle : blocked ? LWarn : LOk,
-                !_fwExists ? "未创建（点[添加规则]或按 F7 创建）" : blocked ? "启用（云存档已阻断）" : "存在 · 禁用（联网正常）");
-            if ((DateTime.UtcNow - _fwAllCheckedAt).TotalSeconds > 5)
-            {
-                _fwAllExists = _rt.Firewall.BlockAllExists();
-                _fwAllEnabled = _rt.Firewall.BlockAllEnabled();
-                _fwAllCheckedAt = DateTime.UtcNow;
-            }
-            bool allOff = _fwAllEnabled == true;
+            bool blocked = p.FwExists && p.FwEnabled == true;   // 规则状态来自后台探针（不卡 UI）
+            SetLight("防火墙", !p.FwExists ? LIdle : blocked ? LWarn : LOk,
+                !p.FwExists ? "未创建（点[添加规则]或按 F7 创建）" : blocked ? "启用（云存档已阻断）" : "存在 · 禁用（联网正常）");
             SetLight("封存档", blocked ? LWarn : LIdle,
                 (blocked ? "已封（F7 解除）" : "未封（F7 启用）") + "　热键 " + _rt.Settings.Hotkeys.BlockSaveKey + (_rt.Settings.Hotkeys.Enabled ? "" : "（热键已禁用）"));
-            SetLight("完全断网", allOff ? LBad : (_fwAllExists ? LIdle : LIdle),
-                (allOff ? "已完全断网（F8 恢复）" : _fwAllExists ? "未断开（F8 断网）" : "未创建（F8 会创建）")
-                + "　热键 " + _rt.Settings.Hotkeys.BlockAllKey);
             SetLight("OCR引擎", _rt.Ocr.Available ? LOk : LBad, _rt.Ocr.Name + (_rt.Ocr.Available ? "" : " 不可用"));
             SetLight("模板库", _rt.Bank.Templates.Count > 0 ? LOk : LBad, _rt.Bank.Templates.Count + " 张");
             if (_blockLabel is not null) _blockLabel.Text = blocked ? "封存档：已封（F7 解除）" : "封存档：未封（F7 启用）";
@@ -1056,12 +1118,42 @@ public sealed class MainForm : Form
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         SaveUiState();
+        if (!_closingAfterShift && _shiftCts is not null)
+        {
+            // 班次还在跑：**先别关**。直接关会让 Application.Run 返回、AppRuntime 随即 Dispose
+            // （Input/Audio/Log 全部失效），而后台那一轮仍会继续走到“封网”把规则又打开 ——
+            // 结果就是“退出后防火墙不干净”，同时后台线程撞已释放对象报异常（点 X 时看到的警告）。
+            e.Cancel = true;
+            _closingAfterShift = true;
+            _rt.Log.Hint("正在安全收尾（回线下 + 恢复联网）后再退出…", "UI");
+            SetShiftStatus("收尾中…");
+            StopShift();
+            // 兜底：最多等 25 秒。超时也允许退出 —— 防火墙那边有退出闸门 + SafeCleanup 保证恢复。
+            _closeCapTimer = new System.Windows.Forms.Timer { Interval = 25000 };
+            _closeCapTimer.Tick += (_, _) =>
+            {
+                _closeCapTimer?.Stop(); _closeCapTimer?.Dispose(); _closeCapTimer = null;
+                if (IsDisposed) return;
+                // 超时也必须**先把规则关掉**再退：以前这里只写了一句“（防火墙已恢复）”就去 Close()，
+                // 而 SafeCleanup 的状态查询一旦失败就会静默跳过 —— 实测规则留在启用态，
+                // 退出后游戏一直“无法从 Rockstar 云服务器下载您保存的数据”。
+                bool closed = _rt.Firewall.SafeCleanup();
+                _rt.Log.Warn("安全收尾超时，强制退出；" + (closed
+                    ? "已确认封网规则关闭"
+                    : "⚠ 未能确认封网规则已关闭，请手动检查规则 " + _rt.Settings.Firewall.RuleName), "UI");
+                Close();
+            };
+            _closeCapTimer.Start();
+            return;
+        }
         base.OnFormClosing(e);
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         try { _lightTimer.Stop(); } catch { }
+        try { _closeCapTimer?.Stop(); _closeCapTimer?.Dispose(); _closeCapTimer = null; } catch { }
+        try { _probeCts?.Cancel(); } catch { }
         try { _shiftCts?.Cancel(); } catch { }
         try { _overlay?.Dispose(); } catch { }
         try { Win32.UnregisterHotKey(Handle, HotkeyId); } catch { }

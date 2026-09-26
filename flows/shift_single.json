@@ -45,6 +45,7 @@
       "action": { "op": "tab", "target": "在线" },
       "observe": ["selectedtab"],
       "expect": [ "ctx:selectedtab like 在线" ],
+      "timeoutSec": 15,
       "retry": { "max": 3, "intervalMs": 800 },
       "onFail": "continue"
     },
@@ -184,6 +185,7 @@
       "action": { "op": "tab", "target": "在线" },
       "observe": ["selectedtab"],
       "expect": [ "ctx:selectedtab like 在线" ],
+      "timeoutSec": 15,
       "retry": { "max": 3, "intervalMs": 800 },
       "onFail": "continue"
     },

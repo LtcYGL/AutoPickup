@@ -1,8 +1,9 @@
 namespace AutoPickup.Core.Audio;
 
 /// <summary>
-/// “进场音频/下云声”cue 源：读取 GTA5_Enhanced.exe 音频会话的实时峰值（0..1）。
-/// 实现（P1.5）：WASAPI IAudioMeterInformation（进程会话级，无需 VBCABLE）。
+/// “下云”cue 的音频源：实时给出 0..1 的音量峰值。
+/// 现实现 = NAudio WASAPI **回环捕获指定输出设备**（免驱动，等价原项目录 CABLE 思路）；
+/// 设备在程序启动那刻绑定（见参数页「3 音频 · 捕获设备」），不可用时退化为 NullAudioCue。
 /// </summary>
 public interface IAudioCueSource
 {

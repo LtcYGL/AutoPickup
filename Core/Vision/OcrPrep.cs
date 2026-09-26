@@ -40,8 +40,8 @@ public static class OcrPrep
         "tab" => Math.Max(0, v.TabUpscale),
         "dialog" => Math.Max(0, v.DialogUpscale),
         "focusrow" => Math.Max(0, v.FocusRowUpscale),
-        "list" => Math.Max(0, v.ListUpscale),
-        _ => Math.Max(0, v.RegionUpscale),
+        // 未单独指定的站点：原样（原来这里读「默认区域倍率」，但没有任何调用点走这一支 —— 参数页已删）
+        _ => 1.0,
     };
 
     /// <summary>区域识别用：按站点固定倍率等比放大（倍率来自实测表，不受人肉裁剪百分比影响）。</summary>
