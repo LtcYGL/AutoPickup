@@ -10,6 +10,28 @@ public static class ViGEmNative
 {
     public const uint VIGEM_ERROR_OK = 0x20000000;
 
+    // ViGEmBus 总线错误码（ViGEmClient.h）。这几种是我们最需要翻译成人话的：
+    // 原样只显示 0xE0000001，用户看不出该干什么（绝大多数是“驱动没装”）。
+    public const uint VIGEM_ERROR_BUS_NOT_FOUND = 0xE0000001;
+    public const uint VIGEM_ERROR_BUS_VERSION_MISMATCH = 0xE0000007;
+    public const uint VIGEM_ERROR_BUS_ACCESS_FAILED = 0xE0000008;
+
+    /// <summary>ViGEmBus 驱动官方发布页（自检页 [手柄驱动下载] 与各提示统一用它）。</summary>
+    public const string DownloadUrl = "https://github.com/nefarius/ViGEmBus/releases";
+
+    /// <summary>把错误码翻成“该干什么”；认不出的码原样附在后面，信息不丢。</summary>
+    public static string Describe(uint err)
+    {
+        string what = err switch
+        {
+            VIGEM_ERROR_BUS_NOT_FOUND => "ViGEmBus 驱动未安装（装完重启本程序）",
+            VIGEM_ERROR_BUS_VERSION_MISMATCH => "ViGEmBus 驱动版本不匹配（请更新驱动）",
+            VIGEM_ERROR_BUS_ACCESS_FAILED => "访问 ViGEmBus 被拒绝（杀软/权限拦截？）",
+            _ => "连接 ViGEmBus 失败",
+        };
+        return what + "（0x" + err.ToString("X8") + "）";
+    }
+
     // XUSB 按键位
     public const ushort DPAD_UP = 0x0001;
     public const ushort DPAD_DOWN = 0x0002;
@@ -106,7 +128,7 @@ public sealed class ViGEmX360Pad : IDisposable
             uint err = ViGEmNative.vigem_connect(_client);
             if (err != ViGEmNative.VIGEM_ERROR_OK)
             {
-                LastError = "vigem_connect 失败 0x" + err.ToString("X8");
+                LastError = ViGEmNative.Describe(err);
                 Cleanup();
                 return;
             }

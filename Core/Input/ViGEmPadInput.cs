@@ -16,13 +16,17 @@ public sealed class ViGEmPadInput : IInputLayer
 
     public string Name => "ViGEm 手柄";
     public bool IsAvailable => _pad is { IsReady: true };
+    /// <summary>不可用时的真实原因（ViGEm 错误码已翻译），供自检页状态灯与提示引用。</summary>
+    public string? LastError => _pad?.LastError;
 
     public ViGEmPadInput(LogBus log)
     {
         _log = log;
         _pad = new ViGEmX360Pad();
         if (_pad.IsReady) _log.Okay("ViGEm 虚拟手柄已连接", "Input");
-        else _log.Warn("ViGEm 不可用: " + (_pad.LastError ?? "未知"), "Input");
+        else _log.Warn("ViGEm 不可用：" + (_pad.LastError ?? "未知")
+            + "。想用手柄 → 装 ViGEmBus 驱动（自检页 [手柄驱动下载]，官网 " + ViGEmNative.DownloadUrl
+            + "）；不想装 → 参数页「5 自动化 · 输入方式」改成 Keyboard。两条路改完都要重启本程序", "Input");
     }
 
     private static ushort ToMask(PadButton b) => b switch
@@ -82,7 +86,8 @@ public sealed class ViGEmPadInput : IInputLayer
             if (!_warnedUnavailable)
             {
                 _warnedUnavailable = true;
-                _log.Warn("ViGEm 虚拟手柄不可用，后续按键全部忽略（检查 ViGEmBus 驱动；本条只提示一次）", "Input");
+                _log.Warn("ViGEm 虚拟手柄不可用，后续按键全部忽略：装驱动见自检页 [手柄驱动下载]，"
+                    + "或参数页「5 自动化 · 输入方式」改成 Keyboard（本条只提示一次）", "Input");
             }
             return;
         }

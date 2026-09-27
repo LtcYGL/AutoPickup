@@ -20,6 +20,8 @@ public sealed class AppRuntime : IDisposable
     public GtaWindowSource Window { get; }
     public FirewallController Firewall { get; }
     public IInputLayer Input { get; }
+    /// <summary>输入层不可用时的真实原因（ViGEm 错误码已翻译）；可用时为空串。</summary>
+    public string InputNote { get; } = "";
     public IAudioCueSource Audio { get; }
     public TemplateBank Bank { get; }
     public NccMatcher Matcher { get; }
@@ -98,6 +100,7 @@ public sealed class AppRuntime : IDisposable
         {
             var pad = new ViGEmPadInput(log);
             Input = pad.IsAvailable ? pad : new NullPadInput(log);
+            InputNote = pad.IsAvailable ? "" : (pad.LastError ?? "ViGEm 不可用");
         }
         if (settings.Audio.Enable)
         {

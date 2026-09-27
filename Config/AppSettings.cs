@@ -34,8 +34,12 @@ public sealed class AppSettings
         [Category("2 防火墙")] [DisplayName("规则名")] [Description("netsh 规则名，默认 AutoPickupBlock；封存档热键用的就是它")]
         public string RuleName { get; set; } = "AutoPickupBlock";
 
-        [Category("2 防火墙")] [DisplayName("封锁域名")] [Description("存档服域名，启用时现解析全部 IPv4（云存档可能换 CDN IP）")]
-        public List<string> BlockDomains { get; set; } = new() { "cs-gta5-prod.ros.rockstargames.com" };
+        [Category("2 防火墙")] [DisplayName("封锁域名")] [Description("封锁域名，启用时现解析全部 IPv4（云存档可能换 CDN IP）。默认两条：cs=云存档、ps=交易/玩家状态")]
+        public List<string> BlockDomains { get; set; } = new()
+        {
+            "cs-gta5-prod.ros.rockstargames.com",
+            "ps-gta5-prod.ros.rockstargames.com",
+        };
 
         [Category("2 防火墙")] [DisplayName("封网网段(IP库)")] [Description("整段封锁(CIDR)，逗号分隔；默认留空。警告：实测封整个 /24 会掉线——192.81.241.0/24 里除了存档 .171，还有 auth .100、ugc .173、pod .15；192.81.245.0/24 是同一套 pod 服务的另一组入口。只有确认某小段是本游戏专用时才填")]
         public List<string> BlockCidrs { get; set; } = new();
@@ -95,8 +99,8 @@ public sealed class AppSettings
         [Category("4 识别·横幅")] [DisplayName("横幅工作高度(px)")] [Description("横幅/主菜单模板匹配前，把整帧等比缩到该高度再匹配（模板保持原尺寸）；默认 768=一套模板通吃所有分辨率且耗时恒定")]
         public int BannerWorkHeight { get; set; } = 768;
 
-        [Category("4 识别·横幅")] [DisplayName("横幅搜索带(高%)")] [Description("模式横幅模板只搜索画面上部这个高度比例（百分比，默认 35）；主菜单横幅仍搜整帧。调大=多花时间换不漏检")]
-        public double BannerSearchPercent { get; set; } = 35.0;
+        [Category("4 识别·横幅")] [DisplayName("横幅搜索带(高%)")] [Description("模式横幅模板只搜索画面上部这个高度比例（百分比，默认 21）；主菜单横幅仍搜整帧。调大=多花时间换不漏检")]
+        public double BannerSearchPercent { get; set; } = 21.0;
 
         [Category("4 识别·横幅")] [DisplayName("横幅模板耗时日志")] [Description("打印横幅模板匹配耗时（当前 Read 的主要耗时点），默认关")]
         public bool BannerTimingLog { get; set; } = false;
@@ -118,26 +122,26 @@ public sealed class AppSettings
 
         [Category("4 识别·横幅")] [DisplayName("缩放步长")] [Description("尺度枚举步长，默认 0.05")]
         public double ScaleStep { get; set; } = 0.05;
-        [Category("4 识别·列表")] [DisplayName("列表左%(宽)")] [Description("列表识别窗口左边界，占画面宽度百分比；默认 5.1%（1024x768 下的 x52）")]
-        public double ListLeftPercent { get; set; } = 5.1;
+        [Category("4 识别·列表")] [DisplayName("列表左%(宽)")] [Description("列表识别窗口左边界，占画面宽度百分比；默认 15%（1024x768 下的 x154）")]
+        public double ListLeftPercent { get; set; } = 15.0;
 
-        [Category("4 识别·列表")] [DisplayName("列表右%(宽)")] [Description("列表识别窗口右边界，占画面宽度百分比；默认 35.2%（1024x768 下的 x360）")]
-        public double ListRightPercent { get; set; } = 35.2;
+        [Category("4 识别·列表")] [DisplayName("列表右%(宽)")] [Description("列表识别窗口右边界，占画面宽度百分比；默认 40%（1024x768 下的 x410）")]
+        public double ListRightPercent { get; set; } = 40.0;
 
-        [Category("4 识别·列表")] [DisplayName("列表上%(高)")] [Description("列表内容区上边界，占画面高度百分比；默认 15.6%（768 下的 y120）")]
-        public double ListTopPercent { get; set; } = 15.6;
+        [Category("4 识别·列表")] [DisplayName("列表上%(高)")] [Description("列表内容区上边界，占画面高度百分比；默认 21%（768 下的 y161）")]
+        public double ListTopPercent { get; set; } = 21.0;
 
-        [Category("4 识别·列表")] [DisplayName("列表下%(高)")] [Description("列表内容区下边界，占画面高度百分比；默认 99.5%（768 下的 y764）")]
-        public double ListBottomPercent { get; set; } = 99.5;
+        [Category("4 识别·列表")] [DisplayName("列表下%(高)")] [Description("列表内容区下边界，占画面高度百分比；默认 89%（768 下的 y684）")]
+        public double ListBottomPercent { get; set; } = 89.0;
 
         [Category("4 识别·列表")] [DisplayName("焦点行白阈值")] [Description("选中行白带亮度门限，默认 140")]
         public double RowWhiteThreshold { get; set; } = 140;
 
-        [Category("4 识别·tab条")] [DisplayName("tab条上%(高)")] [Description("tab 条【兜底】区域上边界（占画面高度百分比）：正常走自适应定位（从整帧词里找 tab 行），只有定位失败时才用这个条带，默认 12.0%（768 下的 y92）")]
-        public double TabStripTopPercent { get; set; } = 12.0;
+        [Category("4 识别·tab条")] [DisplayName("tab条上%(高)")] [Description("tab 条【兜底】区域上边界（占画面高度百分比）：正常走自适应定位（从整帧词里找 tab 行），只有定位失败时才用这个条带，默认 16.0%（768 下的 y123）")]
+        public double TabStripTopPercent { get; set; } = 16.0;
 
-        [Category("4 识别·tab条")] [DisplayName("tab条下%(高)")] [Description("tab 条【兜底】区域下边界，与上一项配对；默认 21.9%（768 下的 y168）")]
-        public double TabStripBottomPercent { get; set; } = 21.9;
+        [Category("4 识别·tab条")] [DisplayName("tab条下%(高)")] [Description("tab 条【兜底】区域下边界，与上一项配对；默认 21.0%（768 下的 y161）")]
+        public double TabStripBottomPercent { get; set; } = 21.0;
 
         [Category("4 识别·tab条")] [DisplayName("tab白块阈值")] [Description("选中 tab 纯白块亮度门限，默认 190")]
         public double TabWhiteThreshold { get; set; } = 190;
@@ -157,14 +161,14 @@ public sealed class AppSettings
         [Category("4 识别·中央弹窗")] [DisplayName("中央裁剪下")] [Description("中央区域下边界，默认 0.74；未命中会自动回退整帧 OCR")]
         public double DialogCropBottom { get; set; } = 0.74;
 
-        [Category("4 识别·提示条")] [DisplayName("左下提示右%(宽)")] [Description("“保存失败”toast 条带右边界，占画面宽度百分比；默认 35%")]
-        public double ToastRightPercent { get; set; } = 35.0;
+        [Category("4 识别·提示条")] [DisplayName("左下提示右%(宽)")] [Description("“保存失败”toast 条带右边界，占画面宽度百分比；默认 18%")]
+        public double ToastRightPercent { get; set; } = 18.0;
 
-        [Category("4 识别·提示条")] [DisplayName("左下提示上%(高)")] [Description("toast 条带上边界，占画面高度百分比；默认 45%")]
-        public double ToastTopPercent { get; set; } = 45.0;
+        [Category("4 识别·提示条")] [DisplayName("左下提示上%(高)")] [Description("toast 条带上边界，占画面高度百分比；默认 20%")]
+        public double ToastTopPercent { get; set; } = 20.0;
 
-        [Category("4 识别·提示条")] [DisplayName("左下提示下%(高)")] [Description("toast 条带下边界，占画面高度百分比；默认 90%")]
-        public double ToastBottomPercent { get; set; } = 90.0;
+        [Category("4 识别·提示条")] [DisplayName("左下提示下%(高)")] [Description("toast 条带下边界，占画面高度百分比；默认 85%")]
+        public double ToastBottomPercent { get; set; } = 85.0;
 
         [Category("4 识别·文本判据")] [DisplayName("模糊匹配阈值(like)")] [Description("流程里 like 判据（如 selectedtab like 在线）的重合度门限 0~1：实测文本里命中目标字的比例达到它才算成立，默认 0.6。匹配太松/太严时调它")]
         public double LikeThreshold { get; set; } = 0.6;
@@ -178,10 +182,10 @@ public sealed class AppSettings
 
     public sealed class AutomationSection
     {
-        [Category("5 自动化")] [DisplayName("按键按住(ms)")] [Description("每次按键按住时长，默认 200ms")]
-        public int PressMs { get; set; } = 200;
+        [Category("5 自动化")] [DisplayName("按键按住(ms)")] [Description("每次按键按住时长，默认 400ms")]
+        public int PressMs { get; set; } = 400;
 
-        [Category("5 自动化")] [DisplayName("输入方式")] [Description("Gamepad=ViGEm 虚拟手柄（推荐，不需要游戏在前台）；Keyboard=键盘 Q/E+Enter+方向键")]
+        [Category("5 自动化")] [DisplayName("输入方式")] [Description("Gamepad=ViGEm 虚拟手柄（推荐，不需要游戏在前台；需装 ViGEmBus 驱动）；Keyboard=键盘 Q/E+Enter+方向键。改完点[保存参数]后需重启程序才生效")]
         public string InputMode { get; set; } = "Gamepad";
 
         [Category("5 自动化")] [DisplayName("模式重读间隔(ms)")] [Description("确认到达线上/线下时读取画面的间隔，默认 400ms；调大可减轻 OCR 压力，调小反应更灵敏")]
@@ -196,20 +200,20 @@ public sealed class AppSettings
 
     public sealed class QuickSwitchSection
     {
-        [Category("6 快捷切换")] [DisplayName("按住↓时长(ms)")] [Description("按住下方向键后等待轮盘出现的时长，默认 500ms")]
-        public int WheelOpenMs { get; set; } = 500;
+        [Category("6 快捷切换")] [DisplayName("按住↓时长(ms)")] [Description("按住下方向键后等待轮盘出现的时长，默认 600ms")]
+        public int WheelOpenMs { get; set; } = 600;
 
         [Category("6 快捷切换")] [DisplayName("推杆时长(ms)")] [Description("右摇杆推向目标方向的持续时长，默认 600ms")]
         public int LookHoldMs { get; set; } = 600;
 
-        [Category("6 快捷切换")] [DisplayName("推杆幅度(0..1)")] [Description("右摇杆幅度，默认 0.6；推不满可调大")]
-        public double StickMagnitude { get; set; } = 0.6;
+        [Category("6 快捷切换")] [DisplayName("推杆幅度(0..1)")] [Description("右摇杆幅度，默认 0.7；推不满可调大")]
+        public double StickMagnitude { get; set; } = 0.7;
     }
 
     public sealed class ShiftSection
     {
-        [Category("7 班次")] [DisplayName("轮数")] [Description("循环轮数，通常 80-90；按仓容与货量设定")]
-        public int Count { get; set; } = 85;
+        [Category("7 班次")] [DisplayName("轮数")] [Description("本次班次要跑几轮；大仓拿满通常 85~95 轮，可分批跑。默认 2")]
+        public int Count { get; set; } = 2;
 
         [Category("7 班次")] [DisplayName("启动前等待(分钟)")] [Description("启动前先等待的分钟数（取货计时 48 分钟，超过即可）；0=立即，默认 0")]
         public int WaitStartMins { get; set; } = 0;
@@ -217,23 +221,23 @@ public sealed class AppSettings
         [Category("7 班次")] [DisplayName("使用封网")] [Description("true=进线上后封存档服 IP 阻断云存档，默认开")]
         public bool UseFirewall { get; set; } = true;
 
-        [Category("7 班次")] [DisplayName("提示等待(s)")] [Description("封网后等左下角提示的秒数（“已获取”=到货 或 “保存失败”任一读到即算过）；两个都没读到才判本轮失败并停止班次。默认 30s")]
-        public int SaveFailWaitSec { get; set; } = 30;
+        [Category("7 班次")] [DisplayName("提示等待(s)")] [Description("封网后等左下角提示的秒数（“已获取”=到货 或 “保存失败”任一读到即算过）；两个都没读到才判本轮失败并停止班次。默认 45s")]
+        public int SaveFailWaitSec { get; set; } = 45;
 
         [Category("7 班次")] [DisplayName("轮间停留(s)")] [Description("回到线下后、下一轮之前的停留，默认 10s")]
         public int BetweenHoldSec { get; set; } = 10;
 
-        [Category("7 班次")] [DisplayName("单轮重试次数")] [Description("某一轮没完成时先恢复同步再重试的次数，默认 2；用完仍失败则记录并继续下一轮（只有“没读到保存失败”才会停止整批）")]
-        public int RoundRetries { get; set; } = 2;
+        [Category("7 班次")] [DisplayName("单轮重试次数")] [Description("某一轮没完成时先恢复同步再重试的次数，默认 3；用完仍失败则记录并继续下一轮（只有“没读到保存失败”才会停止整批）")]
+        public int RoundRetries { get; set; } = 3;
 
-        [Category("7 班次")] [DisplayName("下云cue等待(s)")] [Description("等待“下云”声音 cue 的超时；命中即刻封网，超时按兜底补封。默认 150s")]
-        public int CueTimeoutSec { get; set; } = 150;
+        [Category("7 班次")] [DisplayName("下云cue等待(s)")] [Description("等待“下云”声音 cue 的超时；命中即刻封网，超时按兜底补封。默认 240s")]
+        public int CueTimeoutSec { get; set; } = 240;
 
-        [Category("7 班次")] [DisplayName("封网延迟(cue→封网)(ms)")] [Description("“下云”cue 命中后、真正启用封网规则前的等待毫秒数：0=命中即刻封（默认），调大=稍晚封网（用于试验“晚一点是否更容易撞上存档尝试”）")]
-        public int CueToBlockMs { get; set; } = 0;
+        [Category("7 班次")] [DisplayName("封网延迟(cue→封网)(ms)")] [Description("“下云”cue 命中后、真正启用封网规则前的等待毫秒数：默认 150ms；0=命中即刻封，调大=稍晚封网（用于试验“晚一点是否更容易撞上存档尝试”）")]
+        public int CueToBlockMs { get; set; } = 150;
 
-        [Category("7 班次")] [DisplayName("提示后等待(s)")] [Description("读到“已获取”或“保存失败”之后、再切线下的硬等待秒数，默认 0（不等），上限 3600。论坛经验：几个仓库的到货信息通常要 6~7 秒才全部弹出，等齐了再走")]
-        public int AfterHintWaitSec { get; set; } = 0;
+        [Category("7 班次")] [DisplayName("提示后等待(s)")] [Description("读到“已获取”或“保存失败”之后、再切线下的硬等待秒数，默认 6，上限 3600。论坛经验：几个仓库的到货信息通常要 6~7 秒才全部弹出，等齐了再走")]
+        public int AfterHintWaitSec { get; set; } = 6;
     }
 
     /// <summary>游戏窗口覆盖层（参数页开关）：外部点击穿透窗口，从不注入/抢焦点/影响输入输出。
@@ -252,14 +256,14 @@ public sealed class AppSettings
         [Category("9 覆盖层")] [DisplayName("左上角操作提示")] [Description("F7 封存档/解除、F8 结束游戏进程时，在游戏左上角短暂显示提示，默认开")]
         public bool ToastOnAction { get; set; } = true;
 
-        [Category("9 覆盖层")] [DisplayName("提示停留(ms)")] [Description("左上角提示显示时长，默认 2600ms")]
-        public int ToastMs { get; set; } = 2600;
+        [Category("9 覆盖层")] [DisplayName("提示停留(ms)")] [Description("左上角提示显示时长，默认 2500ms")]
+        public int ToastMs { get; set; } = 2500;
 
         [Category("9 覆盖层")] [DisplayName("班次中自动隐藏")] [Description("班次运行期间强制隐藏覆盖层（避免任何抓帧/视觉干扰），默认开")]
         public bool HideDuringShift { get; set; } = true;
 
-        [Category("9 覆盖层")] [DisplayName("标签字号")] [Description("区域标签字号，默认 10")]
-        public int FontSize { get; set; } = 10;
+        [Category("9 覆盖层")] [DisplayName("标签字号")] [Description("区域标签字号，默认 12")]
+        public int FontSize { get; set; } = 12;
     }
 
     public sealed class HotkeySection

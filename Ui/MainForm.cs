@@ -50,8 +50,13 @@ public sealed class MainForm : Form
     private volatile LightProbe _probe = new();
     private CancellationTokenSource? _probeCts;
     private volatile bool _fwDirty = true;
-    private int _logHeight = 190;
+    /// <summary>日志区高度（拖分栏可改）。默认 240 —— 以前 190 且最小值只给 60，
+    /// 缩放/分辨率一变就被压成两三行，等于看不见。</summary>
+    private int _logHeight = 240;
     private bool _logExpanded = true;
+    /// <summary>日志区最小高度：工具条 + 约 6 行。</summary>
+    private const int LogMinHeight = 132;
+    private readonly ToolTip _tips = new();
     private readonly List<Control> _actionControls = new();
     private PropertyGrid? _grid;
     private SettingsView? _paramsView;
@@ -90,34 +95,53 @@ public sealed class MainForm : Form
 
         // ---------- 日志区（SplitContainer 下半，可拖拽/收起） ----------
         var logPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, BackColor = Color.FromArgb(24, 27, 33) };
-        logPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        logPanel.RowStyles.Add(new RowStyle(SizeType.AutoSize));   // 工具条按内容自适应，写死 30 会把按钮裁掉
         logPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var logHead = new FlowLayoutPanel
+        // 工具条分左右两栏：标题/开关在左，收起·展开按钮固定靠右。
+        // 以前是一条 WrapContents=true 的 FlowLayoutPanel —— 窗口一窄，按钮被换行挤到可视区外，
+        // 就成了“日志工具条只显示一半”（[收起日志] 被切掉）。
+        var logHead = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(10, 3, 6, 0),
+            ColumnCount = 2,
+            RowCount = 1,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             BackColor = Color.FromArgb(31, 35, 42),
-            WrapContents = true,
-            AutoScroll = false,
+            Padding = new Padding(10, 4, 8, 4),
         };
-        logHead.Controls.Add(new Label { Text = "运行日志", ForeColor = Color.FromArgb(215, 222, 232), AutoSize = true, Margin = new Padding(0, 4, 14, 0), Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold) });
-        _autoScroll = new CheckBox { Text = "自动滚动", ForeColor = Color.FromArgb(150, 200, 255), Checked = true, AutoSize = true, Margin = new Padding(0, 5, 14, 0) };
-        logHead.Controls.Add(_autoScroll);
+        logHead.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        logHead.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var logHeadLeft = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            BackColor = Color.FromArgb(31, 35, 42),
+            Margin = new Padding(0),
+        };
+        logHeadLeft.Controls.Add(new Label { Text = "运行日志", ForeColor = Color.FromArgb(215, 222, 232), AutoSize = true, Margin = new Padding(0, 3, 14, 0), Font = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Bold) });
+        _autoScroll = new CheckBox { Text = "自动滚动", ForeColor = Color.FromArgb(150, 200, 255), Checked = true, AutoSize = true, Margin = new Padding(0, 4, 14, 0) };
+        logHeadLeft.Controls.Add(_autoScroll);
         // 底层细节默认不看（OCR 逐次输入、观察词集、跳过的分支…），但**日志文件始终全量记录**，
         // 出问题时可勾上还原现场。
         _chkVerboseLog = new CheckBox
         {
-            Text = "显示底层细节（OCR/观察）",
+            Text = "底层细节",
             ForeColor = Color.FromArgb(150, 200, 255),
             Checked = false,
             AutoSize = true,
-            Margin = new Padding(0, 5, 14, 0),
+            Margin = new Padding(0, 4, 0, 0),
         };
+        _tips.SetToolTip(_chkVerboseLog, "显示 OCR 每次输入、观察词集、被跳过的分支等底层行；日志文件始终全量记录，排查时再勾。");
         _chkVerboseLog.CheckedChanged += (_, _) => _logBox?.Clear();
-        logHead.Controls.Add(_chkVerboseLog);
-        _btnLogFold = new Button { Text = "收起日志", AutoSize = true, FlatStyle = FlatStyle.System, Margin = new Padding(0, 1, 0, 0) };
+        logHeadLeft.Controls.Add(_chkVerboseLog);
+        logHead.Controls.Add(logHeadLeft, 0, 0);
+        _btnLogFold = new Button { Text = "收起日志", AutoSize = true, FlatStyle = FlatStyle.System, Anchor = AnchorStyles.Right, Margin = new Padding(10, 1, 0, 0) };
+        _tips.SetToolTip(_btnLogFold, "收起只隐藏正文，这条工具条留着，随时能再展开。");
         _btnLogFold.Click += (_, _) => ToggleLog();
-        logHead.Controls.Add(_btnLogFold);
+        logHead.Controls.Add(_btnLogFold, 1, 0);
         _logBox = new RichTextBox
         {
             Dock = DockStyle.Fill,
@@ -147,11 +171,21 @@ public sealed class MainForm : Form
             Orientation = Orientation.Horizontal,
             SplitterWidth = 6,
             Panel1MinSize = 200,
-            Panel2MinSize = 60,
+            Panel2MinSize = LogMinHeight,
             BackColor = C_Bg,
         };
         _split.Panel1.Controls.Add(_tabs);
         _split.Panel2.Controls.Add(logPanel);
+        // 拖分栏后记住高度（写进 ui.json，下次启动/展开还原；以前拖了不记，重开就回默认）
+        _split.SplitterMoved += (_, _) =>
+        {
+            try
+            {
+                int h = _split.Height - _split.SplitterWidth - _split.SplitterDistance;
+                if (h >= LogMinHeight) _logHeight = h;
+            }
+            catch { }
+        };
         Controls.Add(_split);
 
         _rt.Log.EntryAdded += OnLogEntry;
@@ -210,8 +244,8 @@ public sealed class MainForm : Form
             BackColor = C_Panel,
             ForeColor = C_Accent,
             Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold),
-            Padding = new Padding(10, 4, 10, 10),
-            Margin = new Padding(0, 0, 0, 8),
+            Padding = new Padding(9, 2, 9, 7),
+            Margin = new Padding(0, 0, 0, 6),
         };
 
     private static Label Tip(string text) => new()
@@ -220,7 +254,7 @@ public sealed class MainForm : Form
         AutoSize = true,
         MaximumSize = new Size(700, 0),
         ForeColor = C_Muted,
-        Margin = new Padding(2, 4, 2, 2),
+        Margin = new Padding(2, 2, 2, 0),
     };
 
     /// <summary>页面容器：自上而下堆叠、宽度随窗口自适应、内容超高时自动滚动。</summary>
@@ -233,12 +267,12 @@ public sealed class MainForm : Form
             WrapContents = false,
             AutoScroll = true,
             BackColor = C_Bg,
-            Padding = new Padding(10, 8, 10, 8),
+            Padding = new Padding(9, 6, 9, 6),
             Tag = "stack",
         };
         foreach (var it in items)
         {
-            it.Margin = new Padding(0, 0, 0, 8);
+            it.Margin = new Padding(0, 0, 0, 6);
             flp.Controls.Add(it);
         }
         flp.ClientSizeChanged += (_, _) => SyncStackWidths();
@@ -319,7 +353,12 @@ public sealed class MainForm : Form
                         }
                         host.PerformLayout();
                         int h = host.PreferredSize.Height;
-                        int want = Math.Max(54, h + g.Padding.Vertical + 24);
+                        // GroupBox 自身（标题栏+边框）的开销**按上一轮实测**，别写死：它随 DPI 缩放变化。
+                        // 以前这里是个魔法数字 +24，容易被误当成“余量”压掉 —— 一压就正好裁掉最后一行状态灯
+                        // （实测 host 183 < 内容 194，少了 11px）。两遍布局时第二遍用的就是实测值。
+                        int chrome = g.Height - host.ClientSize.Height - g.Padding.Vertical;
+                        if (chrome < 20 || chrome > 96) chrome = 32;
+                        int want = Math.Max(40, h + g.Padding.Vertical + chrome + 2);
                         if (g.Height != want) g.Height = want;
                     }
                 }
@@ -349,21 +388,39 @@ public sealed class MainForm : Form
 
     private void ToggleLog() => ApplyLogFold(!_logExpanded);
 
+    /// <summary>收起/展开日志。**收起只隐藏正文，工具条始终留着** ——
+    /// 以前用 Panel2Collapsed 把整块（含[展开日志]按钮）一起藏了，收起后再也没有入口能打开。</summary>
     private void ApplyLogFold(bool expanded)
     {
         _logExpanded = expanded;
-        _split.Panel2Collapsed = !expanded;
+        _logBox.Visible = expanded;
         _btnLogFold.Text = expanded ? "收起日志" : "展开日志";
-        if (expanded) ApplyLogHeight(_logHeight);
+        try
+        {
+            if (expanded)
+            {
+                _split.Panel2MinSize = LogMinHeight;
+                ApplyLogHeight(_logHeight);
+            }
+            else
+            {
+                _split.Panel2MinSize = 26;   // 只留工具条
+                _split.SplitterDistance = Math.Max(_split.Panel1MinSize,
+                    _split.Height - _split.SplitterWidth - 30);
+            }
+        }
+        catch { }
     }
 
     private void ApplyLogHeight(int h)
     {
-        _logHeight = Math.Max(80, h);
+        _logHeight = Math.Max(LogMinHeight, h);
+        if (!_logExpanded) return;
         try
         {
+            _split.Panel2MinSize = LogMinHeight;
             int visible = _split.Height - _split.SplitterWidth;
-            if (visible > _logHeight + 200)
+            if (visible - _logHeight >= _split.Panel1MinSize)
                 _split.SplitterDistance = visible - _logHeight;
         }
         catch { }
@@ -391,9 +448,9 @@ public sealed class MainForm : Form
         {
             int row = i / perRow, col = (i % perRow) * 3;
             if (col == 0) lt.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            var dot = new Label { Text = "●", ForeColor = LIdle, AutoSize = true, Font = new Font("Segoe UI", 12f), Margin = new Padding(2, 0, 0, 0) };
-            var nm = new Label { Text = names[i], AutoSize = true, ForeColor = C_Text, Margin = new Padding(0, 5, 6, 0) };
-            var dt = new Label { Text = "-", AutoSize = true, ForeColor = C_Muted, Margin = new Padding(0, 5, 14, 0) };
+            var dot = new Label { Text = "●", ForeColor = LIdle, AutoSize = true, Font = new Font("Segoe UI", 11f), Margin = new Padding(2, 0, 0, 0) };
+            var nm = new Label { Text = names[i], AutoSize = true, ForeColor = C_Text, Margin = new Padding(0, 3, 6, 0) };
+            var dt = new Label { Text = "-", AutoSize = true, ForeColor = C_Muted, Margin = new Padding(0, 3, 14, 0) };
             lt.Controls.Add(dot, col + 0, row);
             lt.Controls.Add(nm, col + 1, row);
             lt.Controls.Add(dt, col + 2, row);
@@ -411,6 +468,8 @@ public sealed class MainForm : Form
             _chkSaveSample = new CheckBox { Text = "识别时存样本（排查用）", AutoSize = true, Checked = false, Margin = new Padding(10, 8, 4, 0) },
         });
         _actionControls.Add(_chkSaveSample);
+        // 手柄驱动不在程序内安装（用户拍板）：这里只跳官网。装不装、用不用手柄，用户自己定。
+        fa.Controls.Add(ActionButton("手柄驱动下载", OpenViGEmDownload));
         var gAct = StackGroup("自检与诊断（只读；不会改变游戏状态）", fa);
 
         // 数据目录占用与清理：把“会增长的东西”摆出来，并给一个手动清理入口
@@ -437,7 +496,8 @@ public sealed class MainForm : Form
 
         var gTip = StackGroup("说明", Tip(
             "灯色：绿=就绪；黄=需注意（如已封网）；灰=未启用；红=异常。\r\n" +
-            "[自检与诊断] 里的按钮都是只读的，不会动游戏；[打开数据目录]/[清理临时文件] 用来查看和清理会增长的帧、样本、日志。"));
+            "[自检与诊断] 里的按钮都是只读的，不会动游戏；[手柄驱动下载] 用浏览器打开 ViGEmBus 官网（程序内不安装）。\r\n" +
+            "[打开数据目录]/[清理临时文件] 用来查看和清理会增长的帧、样本、日志。"));
 
         return Stack(gLight, gAct, gData, gFw, gTip);
     }
@@ -534,7 +594,7 @@ public sealed class MainForm : Form
         var btnRow = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = true, BackColor = C_Bg };
         btnRow.Controls.AddRange(new Control[] { Btn("保存参数", SaveParams), Btn("恢复默认", ResetParams), Btn("打开数据目录", () => OpenFolder(_rt.DataDir)) });
         lay.Controls.Add(btnRow, 0, 0);
-        var note = new Label { Dock = DockStyle.Fill, ForeColor = C_Muted, AutoSize = false, Text = "说明：全部参数按中文分类列出，直接点值列修改；改完点[保存参数]写入 settings.json（即时作用于后续动作），右下角为所选参数的说明。" };
+        var note = new Label { Dock = DockStyle.Fill, ForeColor = C_Muted, AutoSize = false, Text = "说明：全部参数按中文分类列出，直接点值列修改；改完点[保存参数]写入 settings.json（即时作用于后续动作；个别项如「5 自动化 · 输入方式」需重启程序生效），右下角为所选参数的说明。" };
         lay.Controls.Add(note, 0, 1);
 
         // 参数视图保持同一个实例：SettingsView 的 GetPropertyOwner 需要按行解析宿主 Section，
@@ -1013,7 +1073,15 @@ public sealed class MainForm : Form
             else SetLight("抓帧", p.FrameOk ? LOk : LBad, p.FrameOk
                 ? p.FrameW + "x" + p.FrameH + "（" + p.FrameMethod + "）"
                 : "失败/黑屏（遮挡或全屏独占）" + (p.FrameErr.Length > 0 ? "：" + p.FrameErr : ""));
-            SetLight("输入层", _rt.Input.IsAvailable ? LOk : LBad, _rt.Input.Name + (_rt.Input.IsAvailable ? "" : "（不可用，需 ViGEmBus）"));
+            bool inOk = _rt.Input.IsAvailable;
+        SetLight("输入层", inOk ? LOk : LBad, inOk ? _rt.Input.Name : ShortInputReason(_rt.InputNote));
+        // 完整原因与两条出路放悬停提示：状态灯那一列宽度有限，长文案会把两排灯挤变形
+        if (_lights.TryGetValue("输入层", out var inLt))
+            _tips.SetToolTip(inLt.Detail, inOk
+                ? "手柄可用。不想用手柄：参数页「5 自动化 · 输入方式」改成 Keyboard（需重启程序）"
+                : (_rt.InputNote.Length > 0 ? _rt.InputNote : "ViGEm 不可用")
+                  + "。\r\n用手柄 → 自检页 [手柄驱动下载]（官网 " + ViGEmNative.DownloadUrl
+                  + "，装完重启本程序）；不装 → 参数页「5 自动化 · 输入方式」改成 Keyboard（也要重启）");
             SetLight("音频cue", _rt.Audio.IsAvailable ? LOk : LIdle,
                 _rt.Audio.Name + (_rt.Audio.IsAvailable ? string.Format("　当前音量 {0:P0}", _rt.Audio.CurrentPeak) : "（未启用）"));
 
@@ -1081,6 +1149,33 @@ public sealed class MainForm : Form
         else { SetActionsEnabled(true); RefreshLights(); }
     }
 
+    /// <summary>输入层状态灯的短标签：从 ViGEm 的真实错误里抽一个 6~10 字的结论。</summary>
+    private static string ShortInputReason(string note) =>
+        note.Contains("未安装") ? "未装 ViGEmBus 驱动"
+        : note.Contains("版本") ? "驱动版本不匹配"
+        : note.Contains("拒绝") ? "驱动访问被拒"
+        : "ViGEm 连接失败";
+
+    /// <summary>打开 ViGEmBus 官方发布页（程序内不下载、不安装，用户自行决定）。</summary>
+    private void OpenViGEmDownload()
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(ViGEmNative.DownloadUrl)
+            {
+                UseShellExecute = true,
+            });
+            _rt.Log.Info("已用浏览器打开 ViGEmBus 驱动发布页：" + ViGEmNative.DownloadUrl
+                + "（装完重启本程序；不打算装就把参数页「5 自动化 · 输入方式」改成 Keyboard）", "UI");
+        }
+        catch (Exception ex)
+        {
+            _rt.Log.Warn("打不开浏览器（" + ex.Message + "），请手动访问：" + ViGEmNative.DownloadUrl, "UI");
+            MessageBox.Show(this, "未能自动打开浏览器，请手动访问：\r\n" + ViGEmNative.DownloadUrl,
+                "手柄驱动下载", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+    }
+
     private void SetActionsEnabled(bool enabled)
     {
         foreach (var c in _actionControls) if (c is not null) c.Enabled = enabled;
@@ -1093,25 +1188,49 @@ public sealed class MainForm : Form
         return entry.Source is not ("Ocr" or "Detail");
     }
 
+    /// <summary>来源前缀换成 2~3 字中文标签（英文单词对用户没意义，纯占宽度）。</summary>
+    private static string SourceTag(string src) => src switch
+    {
+        "Flow" => "流程",
+        "Job" => "任务",
+        "UI" => "界面",
+        "Firewall" => "防火墙",
+        "Audio" => "音频",
+        "Input" => "按键",
+        "Ocr" => "识别",
+        "Vision" => "视觉",
+        "Assets" => "资源",
+        "App" => "程序",
+        "Detail" => "观察",
+        "覆盖层" => "覆盖层",
+        _ => src,
+    };
+
+    /// <summary>界面日志一行 = 「时:分:秒 级别符 [来源] 正文」。
+    /// 相比原来去掉了三样噪音：毫秒（只在勾了“底层细节”时显示，用于掐时序）、
+    /// 对多数行没意义的 [Info] 级别词、以及英文来源前缀。**日志文件格式完全不变**，排查照旧。</summary>
     private void OnLogEntry(LogEntry entry)
     {
         if (InvokeRequired) { BeginInvoke(() => OnLogEntry(entry)); return; }
         if (!ShowInLogView(entry)) return;
-        Color lv = entry.Level switch
+        bool verbose = _chkVerboseLog?.Checked == true;
+        (string glyph, Color lv) = entry.Level switch
         {
-            LogLevel.Okay => Color.FromArgb(122, 224, 132),
-            LogLevel.Warn => Color.FromArgb(255, 205, 90),
-            LogLevel.Error => Color.FromArgb(255, 122, 122),
-            LogLevel.Hint => Color.FromArgb(120, 200, 255),
-            _ => Color.FromArgb(205, 214, 224),
+            LogLevel.Okay => ("✓", Color.FromArgb(122, 224, 132)),
+            LogLevel.Warn => ("⚠", Color.FromArgb(255, 205, 90)),
+            LogLevel.Error => ("✗", Color.FromArgb(255, 122, 122)),
+            LogLevel.Hint => ("›", Color.FromArgb(120, 200, 255)),
+            _ => ("·", Color.FromArgb(170, 180, 195)),
         };
         _logBox.SelectionStart = _logBox.TextLength;
         _logBox.SelectionColor = Color.FromArgb(128, 138, 152);
-        _logBox.AppendText("[" + entry.Timestamp.ToString("HH:mm:ss.fff") + "] ");
+        _logBox.AppendText(entry.Timestamp.ToString(verbose ? "HH:mm:ss.fff " : "HH:mm:ss "));
         _logBox.SelectionColor = lv;
-        _logBox.AppendText("[" + entry.Level + "] ");
+        _logBox.AppendText(glyph + " ");
+        _logBox.SelectionColor = Color.FromArgb(140, 175, 215);
+        _logBox.AppendText("[" + SourceTag(entry.Source) + "] ");
         _logBox.SelectionColor = Color.FromArgb(226, 230, 236);
-        _logBox.AppendText(entry.Source + ": " + entry.Message + Environment.NewLine);
+        _logBox.AppendText(entry.Message + Environment.NewLine);
         if (_autoScroll.Checked) { _logBox.SelectionStart = _logBox.TextLength; _logBox.ScrollToCaret(); }
     }
 
